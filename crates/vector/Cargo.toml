@@ -1,0 +1,12 @@
+[package]
+name = "cb-vector"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+application = { path = "../application", package = "cb-application" }
+async-trait.workspace = true
+qdrant-client = "1.13"
+serde_json.workspace = true
+tracing.workspace = true
+tokio = { version = "1", features = ["sync"] }

@@ -1,0 +1,18 @@
+[package]
+name = "cb-web"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+application = { path = "../application", package = "cb-application" }
+domain = { path = "../domain", package = "cb-domain" }
+actors = { path = "../actors", package = "cb-actors" }
+axum = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+ractor = "0.15"
+tokio.workspace = true
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }

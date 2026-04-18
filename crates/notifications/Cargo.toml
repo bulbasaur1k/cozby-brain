@@ -1,0 +1,9 @@
+[package]
+name = "cb-notifications"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+application = { path = "../application", package = "cb-application" }
+async-trait.workspace = true
+tracing.workspace = true

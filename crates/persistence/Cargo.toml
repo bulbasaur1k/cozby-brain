@@ -1,0 +1,11 @@
+[package]
+name = "cb-persistence"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+application = { path = "../application", package = "cb-application" }
+domain = { path = "../domain", package = "cb-domain" }
+async-trait.workspace = true
+chrono.workspace = true
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "chrono", "uuid"] }

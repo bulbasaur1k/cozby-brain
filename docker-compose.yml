@@ -1,0 +1,41 @@
+# Локальная инфра для разработки:
+# - db + qdrant запускаются в Docker
+# - приложение (cozby-brain) запускается НА ХОСТЕ через ./run.sh на порту 8081
+#
+# В корп-прод инфре БД и Qdrant — внешние managed-сервисы,
+# приложение подключается к ним через env-переменные DATABASE_URL / QDRANT_URL.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cozby
+      POSTGRES_PASSWORD: cozby
+      POSTGRES_DB: cozby_brain
+    ports:
+      - "5432:5432"
+    volumes:
+      - cozby_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cozby -d cozby_brain"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  cozby_db:
+  qdrant_data:

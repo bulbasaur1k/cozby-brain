@@ -1,0 +1,33 @@
+[package]
+name = "cozby-brain"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "cozby-brain"
+path = "src/main.rs"
+
+[dependencies]
+domain = { path = "../domain", package = "cb-domain" }
+application = { path = "../application", package = "cb-application" }
+persistence = { path = "../persistence", package = "cb-persistence" }
+actors = { path = "../actors", package = "cb-actors" }
+llm = { path = "../llm", package = "cb-llm" }
+vector = { path = "../vector", package = "cb-vector" }
+notifications = { path = "../notifications", package = "cb-notifications" }
+learning = { path = "../learning", package = "cb-learning" }
+web = { path = "../web", package = "cb-web" }
+chrono.workspace = true
+tokio.workspace = true
+axum = "0.8"
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "migrate", "chrono", "uuid"] }
+ractor = "0.15"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+config = "0.14"
+dotenvy = "0.15"
+anyhow.workspace = true
+reqwest.workspace = true
+qdrant-client = "1.13"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+serde.workspace = true

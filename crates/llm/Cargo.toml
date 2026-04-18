@@ -1,0 +1,12 @@
+[package]
+name = "cb-llm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+application = { path = "../application", package = "cb-application" }
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

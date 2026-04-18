@@ -1,0 +1,11 @@
+[package]
+name = "cb-actors"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+application = { path = "../application", package = "cb-application" }
+domain = { path = "../domain", package = "cb-domain" }
+ractor = "0.15"
+tracing.workspace = true
+chrono.workspace = true
