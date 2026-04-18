@@ -1,3 +1,4 @@
+pub mod doc_repo;
 pub mod learning_repo;
 pub mod note_repo;
 pub mod reminder_repo;

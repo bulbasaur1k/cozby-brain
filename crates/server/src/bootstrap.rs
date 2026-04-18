@@ -6,7 +6,10 @@ use ractor::{cast, Actor};
 use sqlx::postgres::PgPoolOptions;
 
 use web::app_state::AppState;
-use application::ports::{EmbeddingClient, LessonSplitter, LlmClient, Notifier, VectorStore};
+use application::ports::{
+    AttachmentStore, EmbeddingClient, LessonSplitter, LlmClient, Notifier, VectorStore,
+};
+use actors::doc_actor::DocActor;
 use actors::learning_actor::{LearningActor, LearningMsg};
 use actors::note_actor::{NoteActor, NoteMsg};
 use actors::reminder_actor::{ReminderActor, ReminderMsg};
@@ -18,10 +21,15 @@ use llm::openai_compat::OpenAICompatClient;
 use notifications::composite::CompositeNotifier;
 use notifications::log_notifier::LogNotifier;
 use notifications::stdout_notifier::StdoutNotifier;
+use persistence::doc_repo::{
+    PgDocPageHistoryRepository, PgDocPageRepository, PgProjectRepository,
+};
 use persistence::learning_repo::{PgLearningTrackRepository, PgLessonRepository};
 use persistence::note_repo::PgNoteRepository;
 use persistence::reminder_repo::PgReminderRepository;
 use persistence::todo_repo::PgTodoRepository;
+use storage::noop::NoopAttachmentStore;
+use storage::s3_store::S3AttachmentStore;
 use vector::noop::NoopVectorStore;
 use vector::qdrant_store::QdrantVectorStore;
 use web::routes::create_router;
@@ -63,6 +71,29 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
         }
     };
 
+    // --- attachment store (MinIO/S3) ---
+    let attachments: Arc<dyn AttachmentStore> = match cfg.s3() {
+        Some((endpoint, region, access, secret, bucket)) => {
+            tracing::info!(%endpoint, %region, %bucket, "s3 attachment store configured");
+            match S3AttachmentStore::new(endpoint, region, &access, &secret, bucket) {
+                Ok(store) => {
+                    if let Err(e) = store.ensure_bucket().await {
+                        tracing::warn!(error = %e, "s3 bucket ensure failed; continuing");
+                    }
+                    Arc::new(store) as Arc<dyn AttachmentStore>
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "s3 init failed; using noop");
+                    Arc::new(NoopAttachmentStore) as Arc<dyn AttachmentStore>
+                }
+            }
+        }
+        None => {
+            tracing::info!("s3 not configured — attachments disabled");
+            Arc::new(NoopAttachmentStore) as Arc<dyn AttachmentStore>
+        }
+    };
+
     // --- vector store (Qdrant) ---
     let vector: Arc<dyn VectorStore> = match cfg.qdrant_url() {
         Some(url) => {
@@ -89,6 +120,9 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
     let reminder_repo = Arc::new(PgReminderRepository::new(pool.clone()));
     let track_repo = Arc::new(PgLearningTrackRepository::new(pool.clone()));
     let lesson_repo = Arc::new(PgLessonRepository::new(pool.clone()));
+    let project_repo = Arc::new(PgProjectRepository::new(pool.clone()));
+    let doc_page_repo = Arc::new(PgDocPageRepository::new(pool.clone()));
+    let doc_history_repo = Arc::new(PgDocPageHistoryRepository::new(pool.clone()));
 
     // --- lesson splitter (LLM-powered) ---
     let splitter: Arc<dyn LessonSplitter> = Arc::new(LlmLessonSplitter::new(llm.clone()));
@@ -125,6 +159,18 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
     .await?;
     tracing::info!("learning actor spawned");
 
+    let (doc_actor, _d) = Actor::spawn(
+        Some("doc_actor".to_string()),
+        DocActor {
+            project_repo,
+            page_repo: doc_page_repo,
+            history_repo: doc_history_repo,
+        },
+        (),
+    )
+    .await?;
+    tracing::info!("doc actor spawned");
+
     spawn_reminder_ticker(reminder_actor.clone(), Duration::from_secs(10));
     spawn_learning_ticker(
         learning_actor.clone(),
@@ -138,9 +184,11 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
         todo_actor,
         reminder_actor,
         learning_actor,
+        doc_actor,
         llm,
         embedding,
         vector,
+        attachments,
         db: pool,
     };
     Ok((create_router(state), cfg))

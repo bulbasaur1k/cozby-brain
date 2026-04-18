@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use domain::entities::{LearningTrack, Lesson, Note, Reminder, Todo};
+use domain::entities::{
+    Attachment, DocPage, DocPageVersion, LearningTrack, Lesson, Note, Project, Reminder, Todo,
+};
 
 // ---------------- LLM port ----------------
 
@@ -104,6 +106,89 @@ pub trait LessonRepository: Send + Sync {
     async fn list_by_track(&self, track_id: &str) -> Result<Vec<Lesson>, RepoError>;
     /// Next pending lesson for a track (ordered by lesson_num).
     async fn next_pending(&self, track_id: &str) -> Result<Option<Lesson>, RepoError>;
+}
+
+// ---------------- Documentation ----------------
+
+#[async_trait]
+pub trait ProjectRepository: Send + Sync {
+    async fn upsert(&self, project: &Project) -> Result<(), RepoError>;
+    async fn delete(&self, id: &str) -> Result<(), RepoError>;
+    async fn get_by_id(&self, id: &str) -> Result<Option<Project>, RepoError>;
+    async fn get_by_slug(&self, slug: &str) -> Result<Option<Project>, RepoError>;
+    /// Fuzzy lookup — try exact slug, then title ILIKE.
+    async fn find_by_title_like(&self, query: &str) -> Result<Vec<Project>, RepoError>;
+    async fn list(&self) -> Result<Vec<Project>, RepoError>;
+}
+
+#[async_trait]
+pub trait DocPageRepository: Send + Sync {
+    async fn upsert(&self, page: &DocPage) -> Result<(), RepoError>;
+    async fn delete(&self, id: &str) -> Result<(), RepoError>;
+    async fn get_by_id(&self, id: &str) -> Result<Option<DocPage>, RepoError>;
+    async fn get_by_slug(
+        &self,
+        project_id: &str,
+        slug: &str,
+    ) -> Result<Option<DocPage>, RepoError>;
+    /// Fuzzy lookup within a project — title ILIKE.
+    async fn find_by_title_like(
+        &self,
+        project_id: &str,
+        query: &str,
+    ) -> Result<Vec<DocPage>, RepoError>;
+    async fn list_by_project(&self, project_id: &str) -> Result<Vec<DocPage>, RepoError>;
+}
+
+#[async_trait]
+pub trait DocPageHistoryRepository: Send + Sync {
+    async fn insert(&self, version: &DocPageVersion) -> Result<(), RepoError>;
+    async fn list_by_page(&self, page_id: &str) -> Result<Vec<DocPageVersion>, RepoError>;
+    async fn get_version(
+        &self,
+        page_id: &str,
+        version: i32,
+    ) -> Result<Option<DocPageVersion>, RepoError>;
+}
+
+#[async_trait]
+pub trait AttachmentRepository: Send + Sync {
+    async fn insert(&self, attachment: &Attachment) -> Result<(), RepoError>;
+    async fn delete(&self, id: &str) -> Result<(), RepoError>;
+    async fn get(&self, id: &str) -> Result<Option<Attachment>, RepoError>;
+    async fn list_by_page(&self, page_id: &str) -> Result<Vec<Attachment>, RepoError>;
+}
+
+// ---------------- Attachment blob storage (S3/MinIO) ----------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("storage not configured")]
+    NotConfigured,
+    #[error("transport: {0}")]
+    Transport(String),
+    #[error("not found")]
+    NotFound,
+    #[error("other: {0}")]
+    Other(String),
+}
+
+#[async_trait]
+pub trait AttachmentStore: Send + Sync {
+    fn name(&self) -> &str;
+    /// Upload bytes under a key. Returns the stored key.
+    async fn put(
+        &self,
+        key: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String, StorageError>;
+    /// Fetch bytes by key.
+    async fn get(&self, key: &str) -> Result<Vec<u8>, StorageError>;
+    /// Remove object by key.
+    async fn delete(&self, key: &str) -> Result<(), StorageError>;
+    /// Optional — return a presigned URL for direct browser access (if supported).
+    async fn presigned_url(&self, key: &str, ttl_secs: u64) -> Result<Option<String>, StorageError>;
 }
 
 // ---------------- Lesson splitter port (MCP-like) ----------------

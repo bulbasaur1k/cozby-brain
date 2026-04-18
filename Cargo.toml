@@ -9,6 +9,7 @@ members = [
     "crates/vector",
     "crates/notifications",
     "crates/learning",
+    "crates/storage",
     "crates/web",
     "crates/server",
     "crates/cli",

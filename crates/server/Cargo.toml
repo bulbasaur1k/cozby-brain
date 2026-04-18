@@ -16,6 +16,7 @@ llm = { path = "../llm", package = "cb-llm" }
 vector = { path = "../vector", package = "cb-vector" }
 notifications = { path = "../notifications", package = "cb-notifications" }
 learning = { path = "../learning", package = "cb-learning" }
+storage = { path = "../storage", package = "cb-storage" }
 web = { path = "../web", package = "cb-web" }
 chrono.workspace = true
 tokio.workspace = true

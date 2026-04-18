@@ -4,7 +4,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::app_state::AppState;
-use crate::{handlers, learning_handlers};
+use crate::{doc_handlers, handlers, learning_handlers};
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
@@ -70,6 +70,35 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/learning/lessons/{id}/skip",
             axum::routing::post(learning_handlers::skip_lesson),
+        )
+        // documentation
+        .route(
+            "/api/doc/projects",
+            get(doc_handlers::list_projects).post(doc_handlers::create_project),
+        )
+        .route(
+            "/api/doc/projects/{id}",
+            get(doc_handlers::get_project).delete(doc_handlers::delete_project),
+        )
+        .route(
+            "/api/doc/projects/{id}/pages",
+            get(doc_handlers::list_pages),
+        )
+        .route(
+            "/api/doc/pages",
+            axum::routing::post(doc_handlers::create_page),
+        )
+        .route(
+            "/api/doc/pages/{id}",
+            get(doc_handlers::get_page).delete(doc_handlers::delete_page),
+        )
+        .route(
+            "/api/doc/pages/{id}/history",
+            get(doc_handlers::list_page_history),
+        )
+        .route(
+            "/api/doc/pages/{id}/history/{version}",
+            get(doc_handlers::get_page_version),
         )
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())

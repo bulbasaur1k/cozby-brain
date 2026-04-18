@@ -26,6 +26,17 @@ pub struct AppConfig {
     /// Qdrant collection name. Default: cozby_notes
     #[serde(default)]
     pub qdrant_collection: Option<String>,
+    /// MinIO/S3 endpoint URL (e.g. `http://localhost:9000`).
+    #[serde(default)]
+    pub s3_endpoint: Option<String>,
+    #[serde(default)]
+    pub s3_region: Option<String>,
+    #[serde(default)]
+    pub s3_access_key: Option<String>,
+    #[serde(default)]
+    pub s3_secret_key: Option<String>,
+    #[serde(default)]
+    pub s3_bucket: Option<String>,
 }
 
 impl AppConfig {
@@ -62,5 +73,36 @@ impl AppConfig {
             .clone()
             .filter(|c| !c.is_empty())
             .unwrap_or_else(|| "cozby_notes".to_string())
+    }
+
+    /// Returns S3/MinIO config tuple if fully configured.
+    pub fn s3(&self) -> Option<(String, String, String, String, String)> {
+        match (
+            &self.s3_endpoint,
+            &self.s3_access_key,
+            &self.s3_secret_key,
+            &self.s3_bucket,
+        ) {
+            (Some(endpoint), Some(access), Some(secret), Some(bucket))
+                if !endpoint.is_empty()
+                    && !access.is_empty()
+                    && !secret.is_empty()
+                    && !bucket.is_empty() =>
+            {
+                let region = self
+                    .s3_region
+                    .clone()
+                    .filter(|r| !r.is_empty())
+                    .unwrap_or_else(|| "us-east-1".to_string());
+                Some((
+                    endpoint.clone(),
+                    region,
+                    access.clone(),
+                    secret.clone(),
+                    bucket.clone(),
+                ))
+            }
+            _ => None,
+        }
     }
 }

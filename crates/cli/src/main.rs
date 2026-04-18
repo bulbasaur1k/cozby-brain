@@ -63,6 +63,49 @@ enum Cmd {
         #[arg(long, default_value = "1")]
         depth: u8,
     },
+    /// Documentation: projects, pages, history.
+    #[command(subcommand)]
+    Doc(DocCmd),
+}
+
+#[derive(Subcommand)]
+enum DocCmd {
+    /// List all projects.
+    Projects,
+    /// List pages in a project (by slug or id or fuzzy title).
+    Pages { project: String },
+    /// Show a page by id (with current content).
+    Show { page_id: String },
+    /// History of a page (all versions).
+    History { page_id: String },
+    /// Show a specific version of a page.
+    Version { page_id: String, version: i32 },
+    /// Create / append to a page manually (bypasses LLM classifier).
+    Write {
+        project: String,
+        page: String,
+        /// Operation: create | append | section | replace
+        #[arg(long, default_value = "append")]
+        op: String,
+        /// Section heading (for op=section).
+        #[arg(long)]
+        section: Option<String>,
+        /// Inline content (or use --file / stdin).
+        #[arg(long)]
+        content: Option<String>,
+        /// Read content from file.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Tags for the update.
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+    },
+    /// Delete a page or an entire project.
+    Rm {
+        /// `page <page_id>` or `project <project_id>`
+        kind: String,
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -166,6 +209,7 @@ async fn main() -> Result<()> {
         Some(Cmd::Ask { query }) => ask_cmd(&client, &query).await,
         Some(Cmd::Learn(c)) => learn_cmd(&client, c).await,
         Some(Cmd::Graph { id, depth }) => graph_cmd(&client, &id, depth).await,
+        Some(Cmd::Doc(c)) => doc_cmd(&client, c).await,
     }
 }
 
@@ -1030,6 +1074,180 @@ async fn graph_cmd(cli: &Client, id: &str, depth: u8) -> Result<()> {
 
     if root_edges.is_empty() {
         println!("  {}", "(связей не найдено)".dimmed());
+    }
+    Ok(())
+}
+
+// ------------------------ doc commands ------------------------
+
+async fn doc_cmd(cli: &Client, c: DocCmd) -> Result<()> {
+    match c {
+        DocCmd::Projects => {
+            let resp = cli.get("/api/doc/projects").await?;
+            let Some(arr) = resp["data"].as_array() else {
+                println!("(нет проектов)");
+                return Ok(());
+            };
+            if arr.is_empty() {
+                println!("(нет проектов)");
+                return Ok(());
+            }
+            for p in arr {
+                let id = p["id"].as_str().unwrap_or("");
+                let slug = p["slug"].as_str().unwrap_or("");
+                let title = p["title"].as_str().unwrap_or("");
+                println!(
+                    "{}  {:<20}  {:<30}",
+                    &id[..8.min(id.len())],
+                    slug,
+                    title
+                );
+            }
+        }
+        DocCmd::Pages { project } => {
+            let resp = cli
+                .get(&format!("/api/doc/projects/{}/pages", urlencode(&project)))
+                .await?;
+            let Some(arr) = resp["data"].as_array() else {
+                println!("(нет страниц)");
+                return Ok(());
+            };
+            if arr.is_empty() {
+                println!("(нет страниц)");
+                return Ok(());
+            }
+            for page in arr {
+                let id = page["id"].as_str().unwrap_or("");
+                let slug = page["slug"].as_str().unwrap_or("");
+                let title = page["title"].as_str().unwrap_or("");
+                let v = page["version"].as_i64().unwrap_or(1);
+                println!(
+                    "{}  v{:<3}  {:<30}  {:<40}",
+                    &id[..8.min(id.len())],
+                    v,
+                    slug,
+                    title
+                );
+            }
+        }
+        DocCmd::Show { page_id } => {
+            let resp = cli
+                .get(&format!("/api/doc/pages/{page_id}"))
+                .await?;
+            let p = &resp["data"];
+            println!("# {}", p["title"].as_str().unwrap_or(""));
+            println!(
+                "id: {}  slug: {}  version: {}",
+                p["id"].as_str().unwrap_or(""),
+                p["slug"].as_str().unwrap_or(""),
+                p["version"].as_i64().unwrap_or(1)
+            );
+            if let Some(tags) = p["tags"].as_array() {
+                let t: Vec<_> = tags.iter().filter_map(|v| v.as_str()).collect();
+                if !t.is_empty() {
+                    println!("tags: {}", t.join(", "));
+                }
+            }
+            println!();
+            println!("{}", p["content"].as_str().unwrap_or(""));
+        }
+        DocCmd::History { page_id } => {
+            let resp = cli
+                .get(&format!("/api/doc/pages/{page_id}/history"))
+                .await?;
+            let Some(arr) = resp["data"].as_array() else {
+                println!("(нет истории)");
+                return Ok(());
+            };
+            if arr.is_empty() {
+                println!("(нет истории)");
+                return Ok(());
+            }
+            for v in arr {
+                let ver = v["version"].as_i64().unwrap_or(0);
+                let author = v["author"].as_str().unwrap_or("");
+                let summary = v["summary"].as_str().unwrap_or("");
+                let at = v["created_at"].as_str().unwrap_or("");
+                println!("v{ver:<3}  {author:<10}  {summary:<20}  {at}");
+            }
+        }
+        DocCmd::Version { page_id, version } => {
+            let resp = cli
+                .get(&format!("/api/doc/pages/{page_id}/history/{version}"))
+                .await?;
+            let v = &resp["data"];
+            println!("# {}  (version {})", v["title"].as_str().unwrap_or(""), version);
+            println!(
+                "author: {}  summary: {}  at: {}",
+                v["author"].as_str().unwrap_or(""),
+                v["summary"].as_str().unwrap_or(""),
+                v["created_at"].as_str().unwrap_or("")
+            );
+            println!();
+            println!("{}", v["content"].as_str().unwrap_or(""));
+        }
+        DocCmd::Write {
+            project,
+            page,
+            op,
+            section,
+            content,
+            file,
+            tags,
+        } => {
+            let body = if let Some(c) = content {
+                c
+            } else if let Some(p) = file {
+                std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?
+            } else {
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf
+            };
+            #[derive(Serialize)]
+            struct Req {
+                project: String,
+                page: String,
+                content: String,
+                tags: Vec<String>,
+                operation: String,
+                section_title: Option<String>,
+            }
+            let resp = cli
+                .post(
+                    "/api/doc/pages",
+                    &Req {
+                        project,
+                        page,
+                        content: body,
+                        tags,
+                        operation: op,
+                        section_title: section,
+                    },
+                )
+                .await?;
+            let p = &resp["data"];
+            println!(
+                "{}  {}  v{}  (project: {})",
+                p["id"].as_str().unwrap_or(""),
+                p["title"].as_str().unwrap_or(""),
+                p["version"].as_i64().unwrap_or(1),
+                p["project_id"].as_str().unwrap_or("")
+            );
+        }
+        DocCmd::Rm { kind, id } => {
+            let path = match kind.as_str() {
+                "page" => format!("/api/doc/pages/{id}"),
+                "project" => format!("/api/doc/projects/{id}"),
+                _ => {
+                    eprintln!("unknown kind: {kind}. Use 'page' or 'project'.");
+                    return Ok(());
+                }
+            };
+            cli.delete(&path).await?;
+            println!("deleted: {kind} {id}");
+        }
     }
     Ok(())
 }

@@ -279,6 +279,35 @@ pub async fn ingest(
                     }
                 })
             }
+            Classified::Doc(d) => {
+                use actors::doc_actor::{DocMsg, DocOp};
+                let op = match d.operation {
+                    application::llm_use_cases::DocOperation::Create => DocOp::Create,
+                    application::llm_use_cases::DocOperation::Append => DocOp::Append,
+                    application::llm_use_cases::DocOperation::Replace => DocOp::Replace,
+                    application::llm_use_cases::DocOperation::Section => DocOp::Section,
+                };
+                let author = "llm".to_string();
+                match call!(
+                    state.doc_actor,
+                    DocMsg::IngestDoc,
+                    d.project,
+                    d.page,
+                    d.content,
+                    d.tags,
+                    op,
+                    d.section_title,
+                    author
+                ) {
+                    Ok(Ok(page)) => json!({
+                        "type": "doc",
+                        "status": "ok",
+                        "data": page,
+                    }),
+                    Ok(Err(e)) => json!({ "type": "doc", "status": "error", "error": e }),
+                    Err(e) => json!({ "type": "doc", "status": "error", "error": format!("{e}") }),
+                }
+            }
         };
         item_responses.push(item_resp);
     }

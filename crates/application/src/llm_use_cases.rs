@@ -42,27 +42,85 @@ pub enum Classified {
     Reminder(StructuredReminder),
     /// A question / search query — returns keywords.
     Question(StructuredQuestion),
+    /// A documentation page — belongs to a project, markdown content.
+    Doc(StructuredDoc),
 }
 
 #[derive(Debug, Clone)]
 pub struct StructuredQuestion {
     pub keywords: Vec<String>,
-    /// Scope hint: "notes" | "todos" | "reminders" | "all"
+    /// Scope hint: "notes" | "todos" | "reminders" | "docs" | "all"
     pub scope: String,
     /// Original query for logging.
     pub query: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocOperation {
+    /// Create a new page. If page already exists — will fail (or use Replace).
+    Create,
+    /// Append new content at the end of existing page. Adds separator.
+    Append,
+    /// Replace entire page content (keeps history).
+    Replace,
+    /// Insert as a new section (`## Section`) — smart append that doesn't duplicate.
+    Section,
+}
+
+impl DocOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DocOperation::Create => "create",
+            DocOperation::Append => "append",
+            DocOperation::Replace => "replace",
+            DocOperation::Section => "section",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "create" => Some(Self::Create),
+            "append" => Some(Self::Append),
+            "replace" => Some(Self::Replace),
+            "section" => Some(Self::Section),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StructuredDoc {
+    /// Project slug or title (user-readable). Actor resolves to actual project.
+    pub project: String,
+    /// Page slug or title (user-readable). Actor resolves/creates.
+    pub page: String,
+    /// Markdown content to add.
+    pub content: String,
+    /// Tags for this doc update.
+    pub tags: Vec<String>,
+    /// How to apply the content.
+    pub operation: DocOperation,
+    /// Optional — if operation=section, this is the section heading.
+    pub section_title: Option<String>,
+}
+
 const CLASSIFY_SYSTEM: &str = "\
 You are a personal AI agent. Classify user input and produce structured data.
-The user may pack MULTIPLE items in one message (e.g. \"добавь задачу X и ещё задачу Y\") —
-in that case return multiple items in the `items` array.
+The user may pack MULTIPLE items in one message, possibly of DIFFERENT TYPES and for DIFFERENT
+PROJECTS (e.g. \"добавь в docs проекта X про Y, и создай задачу Z\") — in that case return
+multiple items in the `items` array.
 
 Types:
-- note: fact / knowledge / idea / documentation / thought (user wants to remember)
+- note: quick personal knowledge / fact / idea / thought (no project context, no structure needed)
+- doc: FORMAL documentation page that belongs to a PROJECT (has project name + page name)
 - todo: imperative action (\"buy milk\", \"call mom\", \"надо купить\", \"сделать\")
 - reminder: has explicit time phrase (\"через 30 минут\", \"завтра в 10\", \"in 2 hours\")
 - question: search / query (\"what did I write about\", \"найди про\", \"покажи заметки\")
+
+When to pick DOC vs NOTE:
+- doc: user mentions a PROJECT name (\"в проекте X\", \"docs cozby-brain\", \"в документацию X\")
+       OR wants structured documentation (\"создай страницу про Y\", \"документируй Z\")
+- note: personal random thought without project context (\"сегодня узнал про ractor\")
 
 STRICT note templates:
 - TECH template (programming, technologies, tools, frameworks):
@@ -84,21 +142,30 @@ Pick TECH if topic is technical. Otherwise PERSONAL. Preserve ALL user info, imp
 
 For todo: imperative action phrase (не вопрос, не пожелание). Short and clear.
 For reminder: short text + `remind_at` RFC3339 UTC. If no time given, default: now + 1 hour.
-For question: extract 1-5 keywords. Set scope to 'notes' | 'todos' | 'reminders' | 'all'.
+For question: extract 1-5 keywords. Set scope to 'notes' | 'todos' | 'reminders' | 'docs' | 'all'.
+For doc: extract project name, page name, content (clean markdown), operation.
+
+DOC operations:
+- append: add new info to an existing page (end of page) — DEFAULT when adding to existing
+- section: add as a new section with `## heading` — when user explicitly wants a new subsection
+- replace: rewrite entire page — ONLY when user explicitly says \"перепиши\" / \"замени\"
+- create: brand-new page — only when user clearly wants new page (\"создай страницу\", \"новая страничка\")
 
 Respond with ONE JSON object, no prose, matching:
-{\"items\": [{\"type\": \"note\"|\"todo\"|\"reminder\"|\"question\", \"data\": {...}}, ...]}
+{\"items\": [{\"type\": \"note\"|\"todo\"|\"reminder\"|\"question\"|\"doc\", \"data\": {...}}, ...]}
 
 Where data for each type:
 - note:     {\"title\": string, \"content\": string (markdown, strict template), \"tags\": string[] (1-5 lowercase)}
 - todo:     {\"title\": string, \"due_at\": string|null (RFC3339 UTC)}
 - reminder: {\"text\": string, \"remind_at\": string (RFC3339 UTC)}
-- question: {\"keywords\": string[], \"scope\": \"notes\"|\"todos\"|\"reminders\"|\"all\"}
+- question: {\"keywords\": string[], \"scope\": \"notes\"|\"todos\"|\"reminders\"|\"docs\"|\"all\"}
+- doc:      {\"project\": string, \"page\": string, \"content\": string (markdown), \"tags\": string[], \"operation\": \"append\"|\"section\"|\"replace\"|\"create\", \"section_title\": string|null}
 
 Rules for JSON:
 - ALL string values must be valid JSON — escape newlines as \\n, quotes as \\\", backslashes as \\\\.
 - Do NOT wrap the JSON in markdown code fences.
 - Return ONE object with `items` array (1 or more items).
+- For doc: `project` and `page` should be short, human-readable. Server will normalize to slugs.
 
 Write in the same language as the input.";
 
@@ -148,6 +215,7 @@ pub async fn classify_and_structure(
             "todo" => Classified::Todo(parse_todo_data(data)?),
             "reminder" => Classified::Reminder(parse_reminder_data(data, now)?),
             "question" => Classified::Question(parse_question_data(data, raw)?),
+            "doc" => Classified::Doc(parse_doc_data(data)?),
             other => return Err(LlmError::BadResponse(format!("unknown type: {other}"))),
         };
         out.push(classified);
@@ -225,6 +293,54 @@ fn parse_reminder_data(v: &Value, now: DateTime<Utc>) -> Result<StructuredRemind
         None => now + Duration::hours(1),
     };
     Ok(StructuredReminder { text, remind_at })
+}
+
+fn parse_doc_data(v: &Value) -> Result<StructuredDoc, LlmError> {
+    let project = v
+        .get("project")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| LlmError::BadResponse("doc: missing project".into()))?
+        .trim()
+        .to_string();
+    let page = v
+        .get("page")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| LlmError::BadResponse("doc: missing page".into()))?
+        .trim()
+        .to_string();
+    let content = v
+        .get("content")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let tags = v
+        .get("tags")
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    let op_str = v
+        .get("operation")
+        .and_then(|x| x.as_str())
+        .unwrap_or("append");
+    let operation = DocOperation::parse(op_str).unwrap_or(DocOperation::Append);
+    let section_title = v
+        .get("section_title")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Ok(StructuredDoc {
+        project,
+        page,
+        content,
+        tags,
+        operation,
+        section_title,
+    })
 }
 
 fn parse_question_data(v: &Value, raw: &str) -> Result<StructuredQuestion, LlmError> {
