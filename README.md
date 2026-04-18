@@ -120,6 +120,58 @@ target/release/cozby          ← CLI (clap + dialoguer)
 target/release/cozby-tui      ← терминальный UI (ratatui)
 ```
 
+### Установить глобально (`cozby`, `cozby-tui` в любой директории)
+
+Один скрипт собирает, устанавливает в `~/.cargo/bin/` и прописывает путь в **fish** (macOS-дефолтная конфигурация):
+
+```bash
+./release.sh
+```
+
+Что делает:
+1. `cargo build --release` всех трёх бинарников
+2. `cargo install --path crates/{cli,tui,server} --force` → `~/.cargo/bin/`
+3. Проверяет, видит ли fish этот путь. Если нет — добавляет через `fish_add_path -U` (universal, сохраняется между сессиями)
+
+После этого в **новом** fish-терминале:
+
+```fish
+cozby --version             # → cozby 0.1.0
+cozby-tui --help            # TUI
+cozby ingest --text "..."   # работает из любой директории
+```
+
+**Команды скрипта:**
+
+```bash
+./release.sh                # собрать + установить + настроить PATH (fish)
+./release.sh --no-path      # только собрать/установить, не трогать fish
+./release.sh uninstall      # удалить все три бинарника
+```
+
+### Обновление
+
+При изменениях в коде — снова `./release.sh` (пересоберёт и переустановит через `--force`).
+
+### Если установка вручную
+
+Если не хочешь скрипт:
+
+```bash
+# собрать
+cargo build --release -p cozby-brain -p cozby-cli -p cb-tui
+
+# установить
+cargo install --path crates/cli --force
+cargo install --path crates/tui --force
+cargo install --path crates/server --force
+
+# прописать PATH в fish (один раз, потом само)
+fish -c 'fish_add_path -U ~/.cargo/bin'
+```
+
+После — **открыть новый терминал fish**, команды будут доступны глобально.
+
 ---
 
 ## Использование CLI (`cozby`)
