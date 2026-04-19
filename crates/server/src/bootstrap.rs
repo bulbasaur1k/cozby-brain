@@ -19,6 +19,7 @@ use learning::llm_splitter::LlmLessonSplitter;
 use llm::noop::NoopLlmClient;
 use llm::openai_compat::OpenAICompatClient;
 use notifications::composite::CompositeNotifier;
+use notifications::desktop_notifier::DesktopNotifier;
 use notifications::log_notifier::LogNotifier;
 use notifications::stdout_notifier::StdoutNotifier;
 use persistence::doc_repo::{
@@ -109,9 +110,12 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
     };
 
     // --- notifier composition ---
+    // Desktop = native OS notification (macOS Notification Center, Linux libnotify).
+    // macOS Glass sound plays automatically on show.
     let notifier: Arc<dyn Notifier> = Arc::new(CompositeNotifier::new(vec![
         Arc::new(LogNotifier),
         Arc::new(StdoutNotifier),
+        Arc::new(DesktopNotifier::new()),
     ]));
 
     // --- repositories ---

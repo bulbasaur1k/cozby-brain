@@ -7,3 +7,5 @@ edition.workspace = true
 application = { path = "../application", package = "cb-application" }
 async-trait.workspace = true
 tracing.workspace = true
+tokio.workspace = true
+notify-rust = "4"
