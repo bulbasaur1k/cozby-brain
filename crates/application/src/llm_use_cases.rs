@@ -167,6 +167,12 @@ Rules for JSON:
 - Return ONE object with `items` array (1 or more items).
 - For doc: `project` and `page` should be short, human-readable. Server will normalize to slugs.
 
+CRITICAL OUTPUT RULES:
+- Do NOT write any reasoning, thinking, explanations, or preamble.
+- Do NOT write \"Thinking Process:\", \"Let me analyze\", \"<think>\", \"Final Answer:\", etc.
+- Your ENTIRE response must start with `{` and end with `}`.
+- If you must think internally, do it silently and output ONLY the JSON.
+
 Write in the same language as the input.";
 
 /// Classifies the user input AND structures it into one or more items.
@@ -684,12 +690,13 @@ Given a new note and a list of similar existing notes, respond with JSON only:\n
 ///
 /// Handles:
 /// - Markdown code fences (```json ... ```)
-/// - Prose prefix/suffix around the JSON
-/// - Nested braces (counts them to find matching close)
-/// - Quoted strings containing `{` or `}` (skipped while inside a string)
+/// - Reasoning prefix ("Thinking Process:...", `<think>...</think>`)
+/// - Multiple `{...}` blocks — picks the one that looks like a valid answer
+///   (has `items` / `type` / `keywords` / `text` / `title` keys)
+/// - Nested braces (counts them, skips string contents)
 fn extract_json(text: &str) -> Option<&str> {
-    // Strip leading code fence markers if present
-    let stripped = text
+    let cleaned = strip_reasoning_preamble(text);
+    let stripped = cleaned
         .trim()
         .trim_start_matches("```json")
         .trim_start_matches("```JSON")
@@ -697,16 +704,90 @@ fn extract_json(text: &str) -> Option<&str> {
         .trim_end_matches("```")
         .trim();
 
-    // Find first `{` and walk forward counting balance, skipping string contents.
-    let bytes = stripped.as_bytes();
-    let start = bytes.iter().position(|&b| b == b'{')?;
+    // Collect ALL balanced top-level `{...}` blocks.
+    let blocks = find_all_balanced_blocks(stripped);
+    if blocks.is_empty() {
+        return None;
+    }
 
+    // Prefer the LAST block that parses and has an expected key.
+    // Reasoning models write thinking first and the actual JSON last.
+    const EXPECTED_KEYS: &[&str] =
+        &["items", "type", "keywords", "text", "title", "data", "lessons"];
+
+    for (start, end) in blocks.iter().rev() {
+        let slice = &stripped[*start..=*end];
+        if let Ok(v) = serde_json::from_str::<Value>(slice) {
+            if v.is_object()
+                && EXPECTED_KEYS
+                    .iter()
+                    .any(|k| v.get(k).is_some())
+            {
+                return Some(slice);
+            }
+        }
+    }
+
+    // Fallback: last block that at least parses as JSON.
+    for (start, end) in blocks.iter().rev() {
+        let slice = &stripped[*start..=*end];
+        if serde_json::from_str::<Value>(slice).is_ok() {
+            return Some(slice);
+        }
+    }
+
+    // Last resort: first block (whatever it is — caller will produce
+    // a clear parse error with the raw payload).
+    let (s, e) = blocks[0];
+    Some(&stripped[s..=e])
+}
+
+/// Strip common chain-of-thought prefixes produced by reasoning models.
+/// Returns a slice of the input starting after the preamble (if any).
+fn strip_reasoning_preamble(text: &str) -> &str {
+    // DeepSeek / Qwen-style <think>...</think>
+    if let Some(pos) = text.find("</think>") {
+        return &text[pos + "</think>".len()..];
+    }
+    // Some models use <|thinking|>...<|/thinking|>
+    if let Some(pos) = text.find("<|/thinking|>") {
+        return &text[pos + "<|/thinking|>".len()..];
+    }
+    // "Thinking Process:" / "<thinking>" — cut until the first empty line if we
+    // can, otherwise keep original and rely on block scanner below.
+    for marker in ["Thinking Process:", "<thinking>", "Chain of Thought:"] {
+        if text.trim_start().starts_with(marker) {
+            // Try to find a delimiter that looks like end-of-thinking.
+            // Heuristics: "Response:" / "Final Answer:" / "JSON:" / "\n\n{"
+            for end_marker in [
+                "\nResponse:",
+                "\nFinal Answer:",
+                "\nFINAL ANSWER:",
+                "\nJSON:",
+                "\nAnswer:",
+            ] {
+                if let Some(pos) = text.find(end_marker) {
+                    return &text[pos + end_marker.len()..];
+                }
+            }
+            // Fallback: return original; the block scanner will pick the last JSON.
+            break;
+        }
+    }
+    text
+}
+
+/// Scan text for top-level balanced `{...}` blocks, respecting strings/escapes.
+/// Returns `(start, end)` byte indices (inclusive) for each complete block.
+fn find_all_balanced_blocks(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut blocks = Vec::new();
     let mut depth: i32 = 0;
     let mut in_string = false;
     let mut escape_next = false;
-    let mut end: Option<usize> = None;
+    let mut cur_start: Option<usize> = None;
 
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
+    for (i, &b) in bytes.iter().enumerate() {
         if escape_next {
             escape_next = false;
             continue;
@@ -721,20 +802,24 @@ fn extract_json(text: &str) -> Option<&str> {
         }
         match b {
             b'"' => in_string = true,
-            b'{' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    cur_start = Some(i);
+                }
+                depth += 1;
+            }
             b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    end = Some(i);
-                    break;
+                    if let Some(s) = cur_start.take() {
+                        blocks.push((s, i));
+                    }
                 }
             }
             _ => {}
         }
     }
-
-    let end = end?;
-    Some(&stripped[start..=end])
+    blocks
 }
 
 #[cfg(test)]
@@ -758,5 +843,36 @@ mod tests {
         let k = fallback_keywords("Rust rust Obsidian 42");
         assert!(k.contains(&"rust".to_string()));
         assert!(k.contains(&"obsidian".to_string()));
+    }
+
+    #[test]
+    fn extract_json_skips_reasoning_and_picks_answer() {
+        // Corporate / reasoning model response — chain-of-thought then real JSON.
+        let raw = "Thinking Process:\n\
+                   1. **Analyze**: user wants to create a note.\n\
+                   2. An example might be {wrong: value} but that's not the answer.\n\
+                   3. Final output follows.\n\
+                   \n\
+                   {\"items\":[{\"type\":\"note\",\"data\":{\"title\":\"test\",\"content\":\"\",\"tags\":[]}}]}";
+        let got = extract_json(raw).expect("should pick real JSON");
+        let v: Value = serde_json::from_str(got).unwrap();
+        assert!(v.get("items").is_some());
+    }
+
+    #[test]
+    fn extract_json_handles_think_tags() {
+        let raw = "<think>let me think about this</think>{\"type\":\"todo\",\"data\":{\"title\":\"buy milk\",\"due_at\":null}}";
+        let got = extract_json(raw).expect("should extract after </think>");
+        let v: Value = serde_json::from_str(got).unwrap();
+        assert_eq!(v["type"], "todo");
+    }
+
+    #[test]
+    fn extract_json_prefers_last_valid_with_expected_keys() {
+        // Two valid blocks: one with junk, one with our expected shape.
+        let raw = "analysis: {\"x\":1, \"y\":2}\nresult:\n{\"type\":\"note\",\"data\":{}}";
+        let got = extract_json(raw).unwrap();
+        let v: Value = serde_json::from_str(got).unwrap();
+        assert_eq!(v["type"], "note");
     }
 }
