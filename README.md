@@ -1,92 +1,102 @@
 # cozby-brain
 
-Полноценный AI-агент: заметки, todo, напоминания, обучающие треки по файлам, граф связей. Пишешь как думаешь — LLM сама определяет тип (заметка / задача / напоминание / поиск), применяет строгие шаблоны, парсит время, ищет похожее через vector search.
+Полноценный AI-агент: заметки, todo, напоминания, документация по проектам, обучающие треки, граф связей. Пишешь как думаешь — LLM сама определяет тип (note/doc/todo/reminder/question), применяет шаблоны, парсит время, ищет похожее, сохраняет историю.
 
-Backend на Rust (Axum + Ractor + sqlx + Postgres + Qdrant). Три бинарника: **сервер**, **CLI**, **TUI на ratatui**.
+Три бинарника:
+- **`cozby-brain`** — сервер (HTTP API на `:8081`, акторы, LLM, vector search, notifier)
+- **`cozby`** — CLI (clap + dialoguer), скриптование
+- **`cozby-tui`** — современный TUI (ratatui), чат-интерфейс + браузер записей
+
+Backend: Rust · Axum · Ractor · sqlx (Postgres) · Qdrant (gRPC) · MinIO (S3) · OpenAI-совместимый LLM.
 
 ---
 
 ## Требования
 
-- **Docker** + **Docker Compose** (для postgres и qdrant)
-- **Rust 1.85+** (для сборки из исходников) — [rustup.rs](https://rustup.rs)
-- **LLM API-ключ** (routerai.ru / OpenRouter / Groq / Ollama — любой OpenAI-совместимый endpoint)
+- **Docker** + **Docker Compose** — для postgres / qdrant / minio
+- **Rust 1.85+** — [rustup.rs](https://rustup.rs)
+- **LLM API-ключ** — routerai.ru / OpenRouter / Groq / Ollama или любой OpenAI-совместимый endpoint
+- **fish** на macOS (опционально) — `release.sh` автоматически настроит PATH
 
 ---
 
-## Быстрый старт
+## Запуск — один сценарий
 
 ```bash
-# 1. Клонируй и настрой env
-git clone <repo-url> cozby-brain
+git clone https://github.com/bulbasaur1k/cozby-brain.git
 cd cozby-brain
+
 cp .env.example .env
 # Открой .env и вставь свой LLM_API_KEY
 
-# 2. Собери релиз (сервер + CLI + TUI)
-cargo build --release
+cargo build                 # компилируем workspace (первый раз ~2 мин)
+./release.sh                # собираем release + ставим cozby / cozby-tui / cozby-brain в ~/.cargo/bin
+./run.sh                    # поднимает db + qdrant + minio в docker, запускает сервер на :8081
 
-# 3. Один скрипт поднимает всё
-./run.sh
+# В новом терминале — главное приложение:
+cozby-tui
 ```
 
-`run.sh` сам:
-1. Проверит что Docker работает
-2. Поднимет `db` (postgres) и `qdrant` в Docker
-3. Дождётся их healthy-статуса
-4. Проверит что порт `:8081` свободен
-5. Соберёт release-бинарник
-6. Запустит сервер на `:8081` с логами в `logs/cozby-brain-YYYYMMDD.log`
+Всё. Никаких других вариантов, всё через эти три скрипта и установленные бинарники.
 
-**Проверка**:
-```bash
-curl http://localhost:8081/health
-# → {"status":"ok"}
-```
+### Что делает каждый скрипт
 
----
+| Скрипт | Что делает |
+|---|---|
+| `cargo build` | компилирует все 12 крейтов workspace (debug-сборка, для проверки) |
+| `./release.sh` | release-сборка → `cargo install --force` в `~/.cargo/bin` → настройка fish PATH |
+| `./run.sh` | проверяет Docker, поднимает `db`+`qdrant`+`minio`, ждёт healthy, запускает `cozby-brain` с ротацией логов в `logs/` |
 
-## Управление через `./run.sh`
+### Вспомогательные команды `run.sh`
 
 ```bash
-./run.sh              # поднять всё (db + qdrant + app на :8081)
-./run.sh stop         # остановить docker (app убить через Ctrl+C)
-./run.sh status       # статус сервисов + health
+./run.sh              # запустить всё
+./run.sh stop         # остановить docker-сервисы
+./run.sh status       # статус всех сервисов + health
 ./run.sh logs         # tail сегодняшнего лога
 ./run.sh clean-logs   # удалить старые логи
-./run.sh --help       # справка
 ```
 
-Логи автоматически ротируются по дням, старше 7 дней удаляются при старте.
+### Вспомогательные команды `release.sh`
+
+```bash
+./release.sh            # собрать + установить
+./release.sh --no-path  # без правки fish config
+./release.sh uninstall  # удалить бинарники
+```
 
 ---
 
 ## Конфигурация (.env)
 
 ```env
-# ── Postgres (docker-compose поднимает на :5432) ──
 DATABASE_URL=postgres://cozby:cozby@localhost:5432/cozby_brain
-
-# ── HTTP сервер ──
 HTTP_ADDR=0.0.0.0:8081
 RUST_LOG=info,cozby_brain=debug,tower_http=info
 
-# ── LLM (OpenAI-совместимый endpoint) ──
+# LLM (OpenAI-совместимый endpoint)
 LLM_BASE_URL=https://routerai.ru/api/v1
-LLM_MODEL=z-ai/glm-4.7-flash
-LLM_API_KEY=sk-ВАШ_КЛЮЧ
+LLM_MODEL=qwen/qwen3-coder-480b-a35b-instruct
+LLM_API_KEY=sk-...
 
-# ── Embedding (опционально, для vector search) ──
+# Embedding (опционально — для vector search + suggest append)
 EMBEDDING_MODEL=text-embedding-3-small
 
-# ── Qdrant (docker-compose поднимает на :6334 gRPC) ──
+# Qdrant (gRPC)
 QDRANT_URL=http://localhost:6334
 QDRANT_COLLECTION=cozby_notes
+
+# MinIO / S3 (attachments для документации)
+S3_ENDPOINT=http://localhost:9000
+S3_REGION=us-east-1
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+S3_BUCKET=cozby-attachments
 ```
 
-### Альтернативные LLM-провайдеры
+### Альтернативные LLM
 
-**Ollama (локально, бесплатно):**
+**Ollama (локально, бесплатно, без ключа):**
 ```env
 LLM_BASE_URL=http://localhost:11434/v1
 LLM_MODEL=llama3.2
@@ -94,7 +104,7 @@ LLM_API_KEY=
 EMBEDDING_MODEL=nomic-embed-text
 ```
 
-**OpenRouter (есть free-модели):**
+**OpenRouter (free модели):**
 ```env
 LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_MODEL=meta-llama/llama-3.2-3b-instruct:free
@@ -108,211 +118,158 @@ LLM_MODEL=llama-3.1-8b-instant
 LLM_API_KEY=gsk_...
 ```
 
----
-
-## Три бинарника
-
-После `cargo build --release` в `target/release/` лежат:
-
-```
-target/release/cozby-brain    ← сервер (HTTP API на :8081)
-target/release/cozby          ← CLI (clap + dialoguer)
-target/release/cozby-tui      ← терминальный UI (ratatui)
-```
-
-### Установить глобально (`cozby`, `cozby-tui` в любой директории)
-
-Один скрипт собирает, устанавливает в `~/.cargo/bin/` и прописывает путь в **fish** (macOS-дефолтная конфигурация):
-
-```bash
-./release.sh
-```
-
-Что делает:
-1. `cargo build --release` всех трёх бинарников
-2. `cargo install --path crates/{cli,tui,server} --force` → `~/.cargo/bin/`
-3. Проверяет, видит ли fish этот путь. Если нет — добавляет через `fish_add_path -U` (universal, сохраняется между сессиями)
-
-После этого в **новом** fish-терминале:
-
-```fish
-cozby --version             # → cozby 0.1.0
-cozby-tui --help            # TUI
-cozby ingest --text "..."   # работает из любой директории
-```
-
-**Команды скрипта:**
-
-```bash
-./release.sh                # собрать + установить + настроить PATH (fish)
-./release.sh --no-path      # только собрать/установить, не трогать fish
-./release.sh uninstall      # удалить все три бинарника
-```
-
-### Обновление
-
-При изменениях в коде — снова `./release.sh` (пересоберёт и переустановит через `--force`).
-
-### Если установка вручную
-
-Если не хочешь скрипт:
-
-```bash
-# собрать
-cargo build --release -p cozby-brain -p cozby-cli -p cb-tui
-
-# установить
-cargo install --path crates/cli --force
-cargo install --path crates/tui --force
-cargo install --path crates/server --force
-
-# прописать PATH в fish (один раз, потом само)
-fish -c 'fish_add_path -U ~/.cargo/bin'
-```
-
-После — **открыть новый терминал fish**, команды будут доступны глобально.
+**ВАЖНО**: не используй reasoning-модели (`*-thinking`, `glm-4.7-flash`) — они выдают chain-of-thought. Наш парсер их страхует, но instruct-модели надёжнее и быстрее. Выбор: `qwen3-coder-*-instruct`, `llama-3.3-70b-instruct`, `qwen2.5-*-instruct`.
 
 ---
 
-## Использование CLI (`cozby`)
+## Главное приложение — `cozby-tui`
 
-### Universal ingest — пиши как думаешь, LLM сама решит что это
-
-```bash
-# LLM классифицирует: note / todo / reminder / question
-./target/release/cozby ingest --text "надо купить молоко завтра в 10 утра"
-# → [TODO] Купить молоко, due_at: 2026-04-18T10:00:00Z
-
-./target/release/cozby ingest --text "через 30 минут позвонить маме"
-# → [REMINDER] Позвонить маме, remind_at: +30min
-
-./target/release/cozby ingest --text "ractor 0.15 нативно async, убрали async_trait"
-# → [NOTE] TECH-шаблон с заголовками и тегами [ractor, async, rust]
-
-./target/release/cozby ingest --text "что я писал про rust"
-# → [QUESTION] ключевые слова: [rust], найдено: notes=4
-
-# Из файла
-./target/release/cozby ingest --file ~/drafts/meeting.md
-
-# Из stdin (pipe)
-cat draft.md | ./target/release/cozby ingest
-```
-
-### Обучение — файл в ежедневные уроки
+Современный ratatui-интерфейс. Запуск:
 
 ```bash
-# LLM разбивает файл на логические уроки
-./target/release/cozby learn add ~/learning/rust.md \
-  --title "Rust Basics" \
-  --pace 24 \
-  --tags rust,programming
-
-# Список треков
-./target/release/cozby learn list
-
-# Уроки трека
-./target/release/cozby learn lessons <track_id>
-
-# Ручная выдача следующего урока (иначе — автоматически раз в pace часов)
-./target/release/cozby learn next <track_id>
-
-# Отметить изученным / пропустить
-./target/release/cozby learn learned <lesson_id>
-./target/release/cozby learn skip <lesson_id>
-
-# Удалить трек
-./target/release/cozby learn rm <track_id>
+cozby-tui
 ```
 
-Scheduler автоматически каждые 30 минут проверяет все треки. Когда подошло время (pace_hours с `last_delivered_at`) — создаёт Reminder "Новый урок: {title}" и Note с содержимым.
+### Раскладка
 
-### Граф связей
+```
+┌ cozby · http://localhost:8081 · ● connected ──────────────────┐
+├─────────┬──────────────────────┬──────────────────────────────┤
+│ cozby   │  Notes (12)          │ # Ractor notes               │
+│ ─────── │                      │                              │
+│ ▎ Inbox │ ▶ ● Ractor notes    │ tags: rust, actor            │
+│   Notes │   ● Axum 0.8        │                              │
+│   Todos │   ● Learning actor  │ Ractor 0.15 нативно async,   │
+│   …     │                      │ убрали async_trait…          │
+├─────────┴──────────────────────┴──────────────────────────────┤
+│ NORMAL   loaded 12 · Tab focus · 1-6 tabs · Enter open · q quit│
+└───────────────────────────────────────────────────────────────┘
+```
+
+### Клавиши
+
+**Переключение вкладок:**
+- `1`–`6` — прямо на вкладку (Inbox/Notes/Todos/Reminders/Learning/Docs)
+- `]` / `[` — следующая / предыдущая
+
+**Фокус panes:**
+- `Tab` / `Shift+Tab` — цикл `sidebar → list → detail`
+- `h` / `l` — влево / вправо между panes
+
+**Действия (в списке):**
+- `Enter` / `o` — открыть в оверлее (или раскрыть папку в Docs)
+- `Space` — галочка для todo (toggle done)
+- `d` / `x` — удалить (с подтверждением `y/n`)
+- `j k` / `↓ ↑` — навигация
+- `g` / `G` — первый / последний
+
+**Режимы:**
+- `i` — **Ingest** (писать в LLM) → `Enter` отправить, `Esc` отмена
+- `/` — **Search** (live фильтр списка)
+- `:` — **Command** (`:notes`, `:delete`, `:all`, `:recent`, `:q`…)
+- `d` → **Confirm** (`y`/`n`)
+
+**Глобально:** `r` refresh · `Esc`/`q` — выход или закрыть overlay · `Ctrl+C` exit.
+
+### Команды `:cmd`
+
+| | |
+|---|---|
+| `:inbox :notes :todos :reminders :learn :docs` | сменить вкладку |
+| `:open` `:close` | открыть/закрыть detail |
+| `:delete` `:d` `:rm` | удалить выбранное |
+| `:all` | показать ВСЕ todo |
+| `:recent` | только последние 5 дней (по умолчанию) |
+| `:refresh` `:r` `:w` | обновить |
+| `:ingest` `:i` | ingest-режим |
+| `:q` `:quit` | выход |
+
+### Фильтры по умолчанию
+
+- **Todos** — только последние 5 дней (незавершённые с due ≤5д, завершённые за последние 5 дней). `:all` для всех.
+- **Docs** — tree-view: проекты как папки, `Enter` раскрывает/сворачивает. Страницы загружаются лениво, показываются как отступ со страничкой внутри проекта.
+
+---
+
+## Скриптование — `cozby` CLI
+
+Для автоматизации / скриптов / pipe'ов. Все команды работают из любой директории (бинарник в PATH).
+
+### Universal ingest
 
 ```bash
-# ASCII-дерево semantic + wiki-link связей
-./target/release/cozby graph <note_id>
-./target/release/cozby graph <note_id> --depth 2
+# LLM классифицирует: note / doc / todo / reminder / question
+cozby ingest --text "надо купить молоко завтра в 10"
+cozby ingest --text "в проекте cozby-brain на страницу API добавь /api/health"
+cozby ingest --text "через 30 минут позвонить маме"
+
+# из файла / pipe
+cozby ingest --file ~/meeting.md
+cat raw_notes.md | cozby ingest
 ```
 
-Индикаторы: `●` semantic (цвет по score), `○` wiki-link. Зелёный=strong ≥0.8, жёлтый=medium 0.6-0.8, серый=weak <0.6, циан=wiki.
-
-### Ручные команды (без LLM, для скриптов)
+### Напрямую (без LLM)
 
 ```bash
 # Notes
-cozby note add --title "..." --content "..." --tags a,b
+cozby note add --title "..." --content "..." --tags rust,axum
 cozby note list | show <id> | search <q> | rm <id>
 
 # Todos
-cozby todo add "купить молоко" --due +2h
+cozby todo add "купить молоко" --due +2h     # +30m / +2h / +1d / RFC3339
 cozby todo list | done <id> | rm <id>
 
 # Reminders
 cozby remind add "позвонить" --at +30m
 cozby remind list | rm <id>
 
+# Documentation
+cozby doc projects                                       # все проекты
+cozby doc pages <project>                                # страницы проекта
+cozby doc show <page_id>                                 # markdown + meta
+cozby doc history <page_id>                              # версии правок
+cozby doc version <page_id> <v>                          # конкретная версия
+cozby doc write <project> <page> --op append --content "..."  # ручная правка
+cozby doc rm page|project <id>
+
+# Learning
+cozby learn add ~/rust.md --title "Rust" --pace 24
+cozby learn list | lessons <track> | next <track> | learned <lesson> | skip <lesson> | rm <track>
+
 # Smart search
-cozby ask "что я писал про rust"
+cozby ask "что я писал про ractor"
+
+# Graph
+cozby graph <note_id> --depth 2
 ```
 
 ---
 
-## TUI (`cozby-tui`)
-
-Терминальный UI на ratatui с 5 вкладками.
-
-```bash
-./target/release/cozby-tui
-```
-
-**Навигация:**
-- `Tab` / `Shift+Tab` — переключение вкладок
-- `i` — ввод в Inbox (chat-like поле)
-- `Enter` — отправить (LLM классифицирует)
-- `Esc` — отменить ввод
-- `r` — обновить данные
-- `↑` `↓` — навигация по списку
-- `q` — выход
-
-**Вкладки:**
-- **Inbox** — chat-like поле, пишешь → LLM классифицирует → auto-save
-- **Notes / Todos / Reminders / Learning** — просмотр записей
-
-Индикаторы без эмоджи (`●` `○` `■` `□` `✓` `✗` `▶`), цвет по статусу.
-
----
-
-## Интеграции и автоматизация
+## Системные интеграции (curl)
 
 Прямые CRUD endpoints **без LLM** — для скриптов, cron, bash-хуков:
 
 ```bash
-# добавить заметку
 curl -X POST http://localhost:8081/api/notes \
   -H 'content-type: application/json' \
   -d '{"title":"...","content":"...","tags":["..."]}'
 
-# добавить todo
 curl -X POST http://localhost:8081/api/todos \
-  -d '{"title":"Полить цветы","due_at":"2026-04-18T09:00:00Z"}'
+  -d '{"title":"Полить цветы","due_at":"2026-04-22T09:00:00Z"}'
 
-# добавить reminder
 curl -X POST http://localhost:8081/api/reminders \
-  -d '{"text":"Митинг","remind_at":"2026-04-18T10:00:00Z"}'
+  -d '{"text":"Митинг","remind_at":"2026-04-22T10:00:00Z"}'
 ```
 
-Universal ingest для пользовательского ввода:
-
+Universal ingest (с LLM):
 ```bash
-# LLM сама разберёт
 curl -X POST http://localhost:8081/api/ingest \
   -d '{"raw":"через 30 минут позвонить маме"}'
 ```
 
 ---
 
-## HTTP API — полный список
+## HTTP API — сводка
 
 | Метод | Путь | Описание |
 |---|---|---|
@@ -323,149 +280,95 @@ curl -X POST http://localhost:8081/api/ingest \
 | `GET` | `/api/notes/search?q=` | ILIKE поиск |
 | **Todos** | | |
 | `GET/POST` | `/api/todos` | list / create |
-| `POST` | `/api/todos/{id}/complete` | отметить done |
+| `POST` | `/api/todos/{id}/complete` | toggle done |
 | `DELETE` | `/api/todos/{id}` | удалить |
 | **Reminders** | | |
 | `GET/POST` | `/api/reminders` | list / create |
 | `DELETE` | `/api/reminders/{id}` | удалить |
-| **LLM Ingest (универсальный)** | | |
-| `POST` | `/api/ingest` | `{raw}` → LLM классифицирует и возвращает structured |
-| `POST` | `/api/ingest/note/confirm` | подтвердить create или append для note |
-| **Smart search** | | |
+| **Documentation** | | |
+| `GET/POST` | `/api/doc/projects` | list / create |
+| `GET/DELETE` | `/api/doc/projects/{id}` | get / delete |
+| `GET` | `/api/doc/projects/{id}/pages` | страницы проекта |
+| `POST` | `/api/doc/pages` | create / append / section / replace |
+| `GET/DELETE` | `/api/doc/pages/{id}` | get / delete |
+| `GET` | `/api/doc/pages/{id}/history` | все версии |
+| `GET` | `/api/doc/pages/{id}/history/{v}` | конкретная версия |
+| **LLM Ingest** | | |
+| `POST` | `/api/ingest` | универсальный `{raw}` → LLM классифицирует |
+| `POST` | `/api/ingest/note/confirm` | подтвердить create/append заметки |
+| **Search** | | |
 | `GET` | `/api/ask?q=` | LLM-ассистированный поиск |
-| **Graph** | | |
-| `GET` | `/api/graph/{id}?depth=1-3` | граф связей (semantic + wiki) |
+| `GET` | `/api/graph/{id}?depth=1-3` | граф связей |
 | **Learning** | | |
-| `GET/POST` | `/api/learning/tracks` | list / create |
+| `GET/POST` | `/api/learning/tracks` | list / create (+split через LLM) |
 | `GET/DELETE` | `/api/learning/tracks/{id}` | get / delete |
-| `GET` | `/api/learning/tracks/{id}/lessons` | уроки трека |
-| `POST` | `/api/learning/tracks/{id}/next` | ручная выдача следующего |
-| `POST` | `/api/learning/lessons/{id}/learned` | отметить изученным |
+| `GET` | `/api/learning/tracks/{id}/lessons` | уроки |
+| `POST` | `/api/learning/tracks/{id}/next` | выдать следующий |
+| `POST` | `/api/learning/lessons/{id}/learned` | отметить |
 | `POST` | `/api/learning/lessons/{id}/skip` | пропустить |
 
-Формат ответов: `{"status":"ok","data":...}` либо `{"error":"..."}`.
+Формат ответов: `{"status":"ok","data":...}` или `{"error":"..."}`. Мульти-ingest: `{"items":[...]}`.
 
 ---
 
-## Архитектура — 11 независимых крейтов
+## Нотификации
+
+При наступлении `remind_at` у напоминания сервер шлёт во все каналы:
+- **Log** — в server-log с target=`notify`
+- **Stdout** — в консоль `🔔 [Reminder] ...`
+- **Desktop** — нативный popup macOS Notification Center (или Linux libnotify), звук `Glass`
+
+Проверка каналов: `./run.sh logs` + `curl -X POST /api/reminders -d '{"text":"test","remind_at":"через 15 сек"}'`. macOS при первом вызове попросит разрешение — разреши раз и всё.
+
+---
+
+## Архитектура
+
+12 крейтов, hexagonal, направление зависимостей `infrastructure → application → domain`:
 
 ```
 crates/
 ├── domain/           cb-domain         # чистый Rust: entities, services
-├── application/      cb-application    # порты (traits), LLM use-cases, classify_and_structure
+├── application/      cb-application    # порты (traits), LLM use-cases
 ├── persistence/      cb-persistence    # sqlx Pg*Repository
-├── actors/           cb-actors         # Ractor: Note/Todo/Reminder/Learning actors
-├── learning/         cb-learning       # LlmLessonSplitter (MCP-подобный)
-├── llm/              cb-llm            # OpenAI-совместимый клиент + noop
+├── actors/           cb-actors         # Ractor: Note/Todo/Reminder/Learning/Doc
+├── learning/         cb-learning       # LlmLessonSplitter (MCP-like)
+├── llm/              cb-llm            # OpenAI-совместимый client + noop
 ├── vector/           cb-vector         # Qdrant gRPC + noop
-├── notifications/    cb-notifications  # log/stdout/composite notifiers
+├── storage/          cb-storage        # S3/MinIO attachment store + noop
+├── notifications/    cb-notifications  # log/stdout/desktop/composite
 ├── web/              cb-web            # Axum handlers/routes/dto
 ├── server/           cozby-brain       # бинарник сервера + миграции + wiring
-├── cli/              cozby-cli         # бинарник cozby (CLI)
-└── tui/              cb-tui            # бинарник cozby-tui (ratatui)
+├── cli/              cozby-cli         # бинарник `cozby`
+└── tui/              cb-tui            # бинарник `cozby-tui`
 ```
-
-**Граф зависимостей (compile-time enforced):**
-```
-domain ← application ← { persistence, actors, llm, vector, notifications, learning }
-         application + actors ← web
-         ALL ← server
-         HTTP-only → cli, tui
-```
-
-Domain не может зависеть от sqlx/ractor/axum — это физическая граница крейтов, а не просто конвенция.
 
 ---
 
 ## Разработка
 
 ```bash
-# Сборка всего workspace
-cargo build --release
-
-# Unit-тесты
-cargo test --workspace                         # 10/10
-
-# Линтер строгий
-cargo clippy --all-targets -- -D warnings
-
-# Форматирование
+cargo test --workspace                        # unit + integration
+cargo clippy --all-targets -- -D warnings     # строгий линтер
 cargo fmt
+RUST_LOG=debug cargo run -p cozby-brain       # сервер с debug-логами
 
-# Логи с debug уровнем
-RUST_LOG=debug,cozby_brain=trace cargo run -p cozby-brain
-
-# Подключиться к postgres вручную
-docker compose exec db psql -U cozby -d cozby_brain
-
-# Подключиться к qdrant dashboard
-open http://localhost:6333/dashboard
+docker compose exec db psql -U cozby -d cozby_brain     # psql
+open http://localhost:6333/dashboard                    # qdrant UI
+open http://localhost:9001                              # minio console (minioadmin/minioadmin)
 ```
 
 ---
 
 ## Troubleshooting
 
-**Сервер зависает на старте:**
-- Postgres не запущен: `docker compose up -d db`
-- Проверь `DATABASE_URL` в `.env`
-
-**LLM возвращает fallback (title = сырой текст):**
-- Проверь `LLM_API_KEY` в `.env`
-- Проверь что модель доступна у провайдера: `curl https://routerai.ru/api/v1/models -H "Authorization: Bearer sk-..."`
-- Reasoning-модели (glm-4.7-flash) могут занимать 20-60 секунд — это нормально
-
-**Embedding fails (400 "model not found"):**
-- У routerai.ru нет `text-embedding-3-small` — поменяй `EMBEDDING_MODEL` на поддерживаемую или оставь пустым
-- При пустом `EMBEDDING_MODEL` — vector search и suggestions не работают, остальное ок
-
-**Vector search ничего не находит:**
-- Qdrant не запущен: `docker compose up -d qdrant`
-- `EMBEDDING_MODEL` пуст в `.env`
-- Проверь Qdrant: `curl http://localhost:6333/healthz`
-
-**CLI не подключается к серверу:**
-- Сервер не запущен на `:8081`
-- Используй флаг `--api http://HOST:PORT` или `COZBY_API` env var
-
-**Порт 8081 занят:**
-- `lsof -i :8081` — посмотри что занимает
-- `lsof -ti :8081 | xargs kill` — убить (осторожно, не задеть Docker proxy)
-
-**Learning splitter таймаутит:**
-- Reasoning-модель + большой файл → >120с
-- Разбивай файл руками на части или используй не-reasoning модель (например `llama-3.1-8b-instant` на Groq)
-
----
-
-## Docker
-
-Для локальной разработки `docker-compose.yml` поднимает только `db` + `qdrant`. Приложение запускается на хосте через `./run.sh`.
-
-```bash
-# только инфра
-docker compose up -d db qdrant
-
-# статус
-docker compose ps
-
-# логи БД / Qdrant
-docker compose logs -f db
-docker compose logs -f qdrant
-
-# полный сброс (удаляет volumes)
-docker compose down -v
-```
-
-В прод-окружении (K8s/корп-инфра) БД и Qdrant приходят как внешние managed-сервисы — приложение подключается через env-переменные.
-
----
-
-## Roadmap
-
-- Explicit append/create UI в TUI при наличии suggestion
-- Telegram-нотифаер
-- Desktop notifications (`notify-rust`)
-- Экспорт в plain markdown файлы (Obsidian vault compatibility)
-- Reverse-connections (backlinks) в graph
-- Spaced repetition для обучающих треков
+| Симптом | Причина / решение |
+|---|---|
+| Сервер зависает на старте | Docker не запущен → `docker info`. `./run.sh` проверяет сам |
+| `LLM error: transport error sending request` | Проверь `LLM_API_KEY`, сеть, корректность модели. На корп-машине с MitM — уже починено: reqwest использует native CA |
+| Ingest возвращает fallback (title = сырой текст) | Модель — reasoning (`*-thinking`). Наш парсер справляется, но предпочти instruct-модель |
+| Embedding 400 "model not found" | `EMBEDDING_MODEL` не поддерживается провайдером. Отключи или поменяй. Без embedding работает всё кроме similarity search |
+| Порт 8081 занят | `lsof -i :8081` → убей процесс |
+| `./run.sh` — logs старше 7 дней висят | `./run.sh clean-logs` |
+| desktop-notification не появляется | macOS требует разрешение от родительского терминала (Terminal/iTerm/ghostty). Настройки → Уведомления |
+| Docker падает постоянно | перезапусти Docker Desktop; не убивай процессы по порту `kill -9 $(lsof -ti :8080)` — может задеть Docker proxy |
