@@ -266,12 +266,20 @@ pub async fn ingest(
                 }
             }
             Classified::Question(q) => {
-                let (notes, todos, reminders) = search_by_keywords(&state, &q.keywords).await;
+                let filters = QueryFilters {
+                    scope: &q.scope,
+                    status: q.status.as_deref(),
+                    time_window: q.time_window.as_deref(),
+                };
+                let (notes, todos, reminders) =
+                    search_with_filters(&state, &q.keywords, filters).await;
                 json!({
                     "type": "question",
                     "status": "ok",
                     "keywords": q.keywords,
                     "scope": q.scope,
+                    "status_filter": q.status,
+                    "time_window": q.time_window,
                     "data": {
                         "notes": notes,
                         "todos": todos,
@@ -450,51 +458,166 @@ pub async fn confirm_ingest_note(
 
 // ---------- search helper (reused by /api/ask and ingest question branch) ----------
 
-async fn search_by_keywords(
+#[derive(Debug, Default, Clone)]
+struct QueryFilters<'a> {
+    scope: &'a str, // "all" | "notes" | "todos" | "reminders"
+    status: Option<&'a str>,
+    time_window: Option<&'a str>, // "today" | "yesterday" | "week" | "month" | "all"
+}
+
+impl QueryFilters<'_> {
+    fn wants(&self, which: &str) -> bool {
+        self.scope == "all" || self.scope == which
+    }
+}
+
+fn time_window_cutoff(win: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{Duration, Timelike, Utc};
+    match win {
+        "today" => {
+            let now = Utc::now();
+            Some(now - Duration::hours(now.hour() as i64))
+        }
+        "yesterday" => Some(Utc::now() - Duration::days(2)),
+        "week" => Some(Utc::now() - Duration::days(7)),
+        "month" => Some(Utc::now() - Duration::days(30)),
+        _ => None,
+    }
+}
+
+async fn search_with_filters(
     state: &AppState,
     keywords: &[String],
+    filters: QueryFilters<'_>,
 ) -> (Vec<domain::entities::Note>, Vec<domain::entities::Todo>, Vec<domain::entities::Reminder>) {
-    // notes: actor search per keyword + dedup
-    let mut notes_map = std::collections::HashMap::new();
-    for kw in keywords {
-        if let Ok(list) = call!(state.note_actor, NoteMsg::Search, kw.clone()) {
-            for n in list {
-                notes_map.insert(n.id.clone(), n);
+    let now = chrono::Utc::now();
+    let cutoff = filters.time_window.and_then(time_window_cutoff);
+
+    // ── notes ─────────────────────────────────────────────────────
+    let notes: Vec<domain::entities::Note> = if filters.wants("notes") {
+        let mut result: Vec<domain::entities::Note> = if keywords.is_empty() {
+            // Pure listing intent — return all notes
+            call!(state.note_actor, NoteMsg::List).unwrap_or_default()
+        } else {
+            let mut map = std::collections::HashMap::new();
+            for kw in keywords {
+                if let Ok(list) = call!(state.note_actor, NoteMsg::Search, kw.clone()) {
+                    for n in list {
+                        map.insert(n.id.clone(), n);
+                    }
+                }
             }
+            map.into_values().collect()
+        };
+        if let Some(c) = cutoff {
+            result.retain(|n| n.updated_at >= c);
         }
-    }
-    let mut notes: Vec<_> = notes_map.into_values().collect();
-    notes.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        result
+    } else {
+        Vec::new()
+    };
 
-    let todos = call!(state.todo_actor, TodoMsg::List)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|t| match_any(&t.title, keywords))
-        .collect::<Vec<_>>();
+    // ── todos ─────────────────────────────────────────────────────
+    let todos: Vec<domain::entities::Todo> = if filters.wants("todos") {
+        let all = call!(state.todo_actor, TodoMsg::List).unwrap_or_default();
+        all.into_iter()
+            .filter(|t| match_any(&t.title, keywords))
+            .filter(|t| match filters.status {
+                Some("done") => t.done,
+                Some("undone") | Some("pending") => !t.done,
+                Some("overdue") => !t.done && t.due_at.is_some_and(|d| d < now),
+                _ => true,
+            })
+            .filter(|t| match cutoff {
+                Some(c) => {
+                    t.due_at.is_some_and(|d| d >= c)
+                        || t.created_at >= c
+                        || t.completed_at.is_some_and(|d| d >= c)
+                }
+                None => true,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
-    let reminders = call!(state.reminder_actor, ReminderMsg::List)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|r| match_any(&r.text, keywords))
-        .collect::<Vec<_>>();
+    // ── reminders ────────────────────────────────────────────────
+    let reminders: Vec<domain::entities::Reminder> = if filters.wants("reminders") {
+        let all = call!(state.reminder_actor, ReminderMsg::List).unwrap_or_default();
+        all.into_iter()
+            .filter(|r| match_any(&r.text, keywords))
+            .filter(|r| match filters.status {
+                Some("fired") => r.fired,
+                Some("pending") => !r.fired,
+                Some("overdue") => !r.fired && r.remind_at < now,
+                _ => true,
+            })
+            .filter(|r| match cutoff {
+                Some(c) => r.remind_at >= c || r.created_at >= c,
+                None => true,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     (notes, todos, reminders)
 }
 
-/// Unified smart search across notes, todos and reminders.
-/// LLM extracts keywords, then each keyword queries the respective actors.
+/// Unified smart search — understands keywords + status filters + time windows.
 pub async fn ask(
     State(state): State<AppState>,
     Query(q): Query<AskQuery>,
 ) -> impl IntoResponse {
     tracing::debug!(query = %q.q, llm = state.llm.name(), "ask / smart search");
-    let keywords = llm_use_cases::extract_search_keywords(state.llm.as_ref(), &q.q).await;
-    let (notes, todos, reminders) = search_by_keywords(&state, &keywords).await;
+    // Delegate to classifier so we get status/time_window filters too.
+    let classified = llm_use_cases::classify_and_structure(
+        state.llm.as_ref(),
+        &q.q,
+        chrono::Utc::now(),
+    )
+    .await;
+
+    let (keywords, filters_owned) = match classified {
+        Ok(items) => items
+            .into_iter()
+            .find_map(|c| match c {
+                llm_use_cases::Classified::Question(qq) => Some(qq),
+                _ => None,
+            })
+            .map(|qq| {
+                (
+                    qq.keywords,
+                    (qq.scope, qq.status, qq.time_window),
+                )
+            })
+            .unwrap_or_else(|| {
+                // not classified as question — fall back to keyword extraction
+                (Vec::new(), ("all".to_string(), None, None))
+            }),
+        Err(_) => {
+            let kw =
+                llm_use_cases::extract_search_keywords(state.llm.as_ref(), &q.q).await;
+            (kw, ("all".to_string(), None, None))
+        }
+    };
+
+    let (scope_s, status_s, tw_s) = filters_owned;
+    let filters = QueryFilters {
+        scope: &scope_s,
+        status: status_s.as_deref(),
+        time_window: tw_s.as_deref(),
+    };
+    let (notes, todos, reminders) = search_with_filters(&state, &keywords, filters).await;
     (
         StatusCode::OK,
         Json(json!({
             "status": "ok",
             "keywords": keywords,
+            "scope": scope_s,
+            "status_filter": status_s,
+            "time_window": tw_s,
             "data": {
                 "notes": notes,
                 "todos": todos,

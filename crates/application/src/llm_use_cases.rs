@@ -53,6 +53,14 @@ pub struct StructuredQuestion {
     pub scope: String,
     /// Original query for logging.
     pub query: String,
+    /// State filter:
+    ///   todos:     "done" | "undone" | "overdue"
+    ///   reminders: "fired" | "pending" | "overdue"
+    ///   notes/docs: None
+    pub status: Option<String>,
+    /// Relative time window for filtering by created_at / due_at / remind_at:
+    ///   "today" | "yesterday" | "week" | "month" | "all"
+    pub time_window: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +150,14 @@ Pick TECH if topic is technical. Otherwise PERSONAL. Preserve ALL user info, imp
 
 For todo: imperative action phrase (не вопрос, не пожелание). Short and clear.
 For reminder: short text + `remind_at` RFC3339 UTC. If no time given, default: now + 1 hour.
-For question: extract 1-5 keywords. Set scope to 'notes' | 'todos' | 'reminders' | 'docs' | 'all'.
+For question: extract keywords + scope + OPTIONAL status/time_window filters.
+  * keywords: 0-5 topic words (empty if pure listing like \"покажи все задачи\").
+  * scope: 'notes' | 'todos' | 'reminders' | 'docs' | 'all'.
+  * status (optional): for listing intents like \"невыполненные\", \"просроченные\", \"сделанные\":
+      - todos:     \"done\" | \"undone\" | \"overdue\"
+      - reminders: \"fired\" | \"pending\" | \"overdue\"
+      - skip for notes/docs
+  * time_window (optional): \"today\" | \"yesterday\" | \"week\" | \"month\" | \"all\"
 For doc: extract project name, page name, content (clean markdown), operation.
 
 DOC operations:
@@ -158,7 +173,7 @@ Where data for each type:
 - note:     {\"title\": string, \"content\": string (markdown, strict template), \"tags\": string[] (1-5 lowercase)}
 - todo:     {\"title\": string, \"due_at\": string|null (RFC3339 UTC)}
 - reminder: {\"text\": string, \"remind_at\": string (RFC3339 UTC)}
-- question: {\"keywords\": string[], \"scope\": \"notes\"|\"todos\"|\"reminders\"|\"docs\"|\"all\"}
+- question: {\"keywords\": string[], \"scope\": \"notes\"|\"todos\"|\"reminders\"|\"docs\"|\"all\", \"status\": string|null, \"time_window\": string|null}
 - doc:      {\"project\": string, \"page\": string, \"content\": string (markdown), \"tags\": string[], \"operation\": \"append\"|\"section\"|\"replace\"|\"create\", \"section_title\": string|null}
 
 Rules for JSON:
@@ -366,10 +381,22 @@ fn parse_question_data(v: &Value, raw: &str) -> Result<StructuredQuestion, LlmEr
         .and_then(|x| x.as_str())
         .unwrap_or("all")
         .to_string();
+    let status = v
+        .get("status")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
+    let time_window = v
+        .get("time_window")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
     Ok(StructuredQuestion {
         keywords,
         scope,
         query: raw.to_string(),
+        status,
+        time_window,
     })
 }
 
