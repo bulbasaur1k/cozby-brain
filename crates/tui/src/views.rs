@@ -1,31 +1,20 @@
 //! Rendering.
-//!
-//! Раскладка:
-//! ┌──────────────────────────────────────────────────────────────┐
-//! │ header: cozby · http://… · connected                         │
-//! ├─────────┬──────────────────────┬─────────────────────────────┤
-//! │ sidebar │   list                │  detail / inbox preview    │
-//! │ (tabs)  │                       │                             │
-//! │         │                       │                             │
-//! ├─────────┴──────────────────────┴─────────────────────────────┤
-//! │ status: mode · spinner · message · keybinding hints          │
-//! └──────────────────────────────────────────────────────────────┘
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use serde_json::Value;
 
-use crate::app::{App, Mode, Tab};
+use crate::app::{App, DocRow, Focus, Mode, PendingConfirm, Tab, TodoFilter};
 use crate::indicators;
+use crate::markdown;
 use crate::theme;
 
 pub fn render(f: &mut Frame, app: &App) {
     let area = f.area();
 
-    // header / body / status
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -38,6 +27,14 @@ pub fn render(f: &mut Frame, app: &App) {
     render_header(f, app, chunks[0]);
     render_body(f, app, chunks[1]);
     render_statusbar(f, app, chunks[2]);
+
+    // Overlays
+    if app.opened.is_some() {
+        render_detail_overlay(f, app, area);
+    }
+    if app.mode == Mode::Confirm {
+        render_confirm(f, app, area);
+    }
 }
 
 // ─── header ──────────────────────────────────────────────────────────
@@ -102,7 +99,12 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items).block(theme::block("cozby"));
+    let block = if app.focus == Focus::Sidebar {
+        theme::block_focused("cozby")
+    } else {
+        theme::block("cozby")
+    };
+    let list = List::new(items).block(block);
     f.render_widget(list, area);
 }
 
@@ -112,37 +114,48 @@ fn render_main(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Список текущей вкладки с фильтром
+    if app.tab == Tab::Docs {
+        render_docs_tree(f, app, area);
+        return;
+    }
+
     let items = app.filtered_items();
     let rendered: Vec<ListItem> = items
         .iter()
         .map(|v| ListItem::new(row_for_tab(app.tab, v)))
         .collect();
 
-    let title = if !app.search.is_empty() {
-        format!(
-            "{}  (/ {}  · {} of {})",
+    let mut title = format!("{}  ({})", app.tab.label(), app.items.len());
+    if !app.search.is_empty() {
+        title = format!(
+            "{}  / {}  ({}/{})",
             app.tab.label(),
             app.search,
             items.len(),
             app.items.len()
-        )
+        );
+    }
+    if app.tab == Tab::Todos {
+        if let TodoFilter::LastDays(n) = app.todo_filter {
+            title.push_str(&format!("  · last {n}d"));
+        } else {
+            title.push_str("  · all");
+        }
+    }
+    if app.loading {
+        title.push_str(&format!("  {}", app.spinner_frame()));
+    }
+
+    let block = if app.focus == Focus::List {
+        theme::block_focused(&title)
     } else {
-        format!("{}  ({})", app.tab.label(), app.items.len())
+        theme::block(&title)
     };
 
-    let mut list = List::new(rendered)
-        .block(theme::block(&title))
+    let list = List::new(rendered)
+        .block(block)
         .highlight_style(theme::selected_row())
         .highlight_symbol("▶ ");
-
-    if app.loading {
-        list = list.block(theme::block(&format!(
-            "{}  {}",
-            title,
-            app.spinner_frame()
-        )));
-    }
 
     let mut state = ListState::default();
     if !items.is_empty() {
@@ -151,20 +164,71 @@ fn render_main(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+fn render_docs_tree(f: &mut Frame, app: &App, area: Rect) {
+    let rows = app.docs_rows();
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| match row {
+            DocRow::Project {
+                value,
+                expanded,
+                page_count,
+            } => {
+                let chevron = if *expanded { "▼" } else { "▶" };
+                let slug = value["slug"].as_str().unwrap_or("");
+                let title = value["title"].as_str().unwrap_or("");
+                ListItem::new(Line::from(vec![
+                    Span::styled(chevron, theme::accent()),
+                    Span::raw(" "),
+                    Span::styled(indicators::SQ_FILLED, theme::link()),
+                    Span::raw(" "),
+                    Span::styled(slug.to_string(), theme::accent()),
+                    Span::styled("  ", theme::overlay()),
+                    Span::styled(title.to_string(), theme::text()),
+                    Span::styled(format!("  ({page_count})"), theme::overlay()),
+                ]))
+            }
+            DocRow::Page { value, .. } => {
+                let title = value["title"].as_str().unwrap_or("");
+                let v = value["version"].as_i64().unwrap_or(1);
+                ListItem::new(Line::from(vec![
+                    Span::styled("    ", theme::overlay()),
+                    Span::styled(indicators::DOT_EMPTY, theme::subtext()),
+                    Span::raw(" "),
+                    Span::styled(title.to_string(), theme::text()),
+                    Span::styled(format!("  v{v}"), theme::overlay()),
+                ]))
+            }
+        })
+        .collect();
+
+    let title = format!("Docs  ({} projects)", app.items.len());
+    let block = if app.focus == Focus::List {
+        theme::block_focused(&title)
+    } else {
+        theme::block(&title)
+    };
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme::selected_row())
+        .highlight_symbol("▶ ");
+    let mut state = ListState::default();
+    if !rows.is_empty() {
+        state.select(Some(app.selected.min(rows.len() - 1)));
+    }
+    f.render_stateful_widget(list, area, &mut state);
+}
+
 fn render_inbox(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // input box
-            Constraint::Min(1),    // preview of last ingest
-        ])
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(area);
 
-    // input
     let label = if app.mode == Mode::Ingest {
         "ingest (Enter → send · Esc → cancel)"
     } else {
-        "ingest (i → edit · / → search last · r → refresh)"
+        "ingest (i → edit)"
     };
     let input = Paragraph::new(app.input.as_str()).block(if app.mode == Mode::Ingest {
         theme::block_focused(label)
@@ -173,7 +237,6 @@ fn render_inbox(f: &mut Frame, app: &App, area: Rect) {
     });
     f.render_widget(input, rows[0]);
 
-    // preview
     let preview_text = if let Some(v) = &app.last_ingest {
         format_ingest_result(v)
     } else {
@@ -187,91 +250,127 @@ fn render_inbox(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn welcome_message() -> String {
-    "Пиши что угодно — LLM классифицирует автоматически:\n\
+    "Пиши что угодно — LLM классифицирует:\n\
      \n\
-     note     — факт/мысль/документация\n\
-     doc      — страница в проекте: \"в проекте X на страницу Y…\"\n\
-     todo     — действие: \"надо сделать…\"\n\
-     reminder — с временем: \"через 30 минут…\"\n\
-     question — поиск: \"что я писал про…\"\n\
+     note     — мысль / факт\n\
+     doc      — страница в проекте (\"в проекте X…\")\n\
+     todo     — действие (\"надо…\")\n\
+     reminder — с временем (\"через 30 мин…\")\n\
+     question — поиск\n\
      \n\
-     В одном сообщении можно смешивать разные типы и проекты."
+     В одном сообщении можно смешивать разные типы."
         .into()
 }
 
-// ─── detail panel ────────────────────────────────────────────────────
+// ─── detail panel (right side, always visible) ──────────────────────
 
 fn render_detail(f: &mut Frame, app: &App, area: Rect) {
     if app.tab == Tab::Inbox {
-        render_help(f, area);
+        render_help(f, app, area);
         return;
     }
 
-    let items = app.filtered_items();
-    let selected = items.get(app.selected);
-
-    let title = "details";
-    let text = match selected {
-        Some(v) => format_detail(app.tab, v),
-        None => "(нет выбранного элемента)".into(),
+    let title = "preview";
+    let block = if app.focus == Focus::Detail {
+        theme::block_focused(title)
+    } else {
+        theme::block(title)
     };
 
-    let p = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .block(theme::block(title))
-        .style(theme::text());
-    f.render_widget(p, area);
+    let (content_for_md, fallback_text): (Option<String>, String) = match app.tab {
+        Tab::Notes => {
+            let v = app.filtered_items();
+            match v.get(app.selected) {
+                Some(n) => {
+                    let md = n["content"].as_str().unwrap_or("").to_string();
+                    (Some(md), format_detail_meta_note(n))
+                }
+                None => (None, "(пусто)".into()),
+            }
+        }
+        Tab::Docs => {
+            let rows = app.docs_rows();
+            match rows.get(app.selected) {
+                Some(DocRow::Project { value, .. }) => (
+                    None,
+                    format!(
+                        "# {}\n\n{}\n\nid: {}\nslug: {}",
+                        value["title"].as_str().unwrap_or(""),
+                        value["description"].as_str().unwrap_or(""),
+                        value["id"].as_str().unwrap_or(""),
+                        value["slug"].as_str().unwrap_or("")
+                    ),
+                ),
+                Some(DocRow::Page { value, .. }) => {
+                    let md = value["content"].as_str().unwrap_or("").to_string();
+                    (Some(md), format_detail_meta_page(value))
+                }
+                None => (None, "(пусто)".into()),
+            }
+        }
+        _ => {
+            let items = app.filtered_items();
+            match items.get(app.selected) {
+                Some(v) => (None, format_detail(app.tab, v)),
+                None => (None, "(пусто)".into()),
+            }
+        }
+    };
+
+    match content_for_md {
+        Some(md) => {
+            let text = markdown::render(&md);
+            let p = Paragraph::new(text).wrap(Wrap { trim: false }).block(block);
+            f.render_widget(p, area);
+            let _ = fallback_text;
+        }
+        None => {
+            let p = Paragraph::new(fallback_text)
+                .wrap(Wrap { trim: false })
+                .block(block)
+                .style(theme::text());
+            f.render_widget(p, area);
+        }
+    }
 }
 
-fn render_help(f: &mut Frame, area: Rect) {
+fn render_help(f: &mut Frame, app: &App, area: Rect) {
+    let _ = app;
     let lines = vec![
         Line::from(Span::styled("Клавиши", theme::accent())),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  h/l Tab ← → ", theme::info()),
-            Span::styled("переключить вкладку", theme::subtext()),
-        ]),
-        Line::from(vec![
-            Span::styled("  j/k ↓ ↑      ", theme::info()),
-            Span::styled("навигация", theme::subtext()),
-        ]),
-        Line::from(vec![
-            Span::styled("  g / G        ", theme::info()),
-            Span::styled("к началу / к концу", theme::subtext()),
-        ]),
-        Line::from(vec![
-            Span::styled("  1-6          ", theme::info()),
-            Span::styled("прямой переход на вкладку", theme::subtext()),
-        ]),
-        Line::from(vec![
-            Span::styled("  i            ", theme::info()),
-            Span::styled("ingest (писать в LLM)", theme::subtext()),
-        ]),
-        Line::from(vec![
-            Span::styled("  /            ", theme::info()),
-            Span::styled("фильтр по списку", theme::subtext()),
-        ]),
-        Line::from(vec![
-            Span::styled("  r            ", theme::info()),
-            Span::styled("обновить", theme::subtext()),
-        ]),
-        Line::from(vec![
-            Span::styled("  q / Esc      ", theme::info()),
-            Span::styled("выход", theme::subtext()),
-        ]),
+        key_line("Tab / Shift+Tab", "цикл фокуса"),
+        key_line("1 - 6  ·  [t / ]t", "переключение вкладок"),
+        key_line("j / k  ·  ↓ ↑", "навигация"),
+        key_line("g / G", "к началу / к концу"),
+        key_line("Enter / o", "открыть запись (раскрыть проект)"),
+        key_line("Space", "toggle done (todo)"),
+        key_line("d / x", "удалить (y/n подтверждение)"),
+        key_line("i", "ingest — писать в LLM"),
+        key_line("/", "фильтр списка"),
+        key_line(":", "командный режим"),
+        key_line("r", "обновить"),
+        key_line("Esc  ·  q", "закрыть detail / выход"),
+        Line::from(""),
+        Line::from(Span::styled("Команды (:)", theme::accent())),
+        Line::from(""),
+        key_line(":notes :docs :todos …", "сменить вкладку"),
+        key_line(":open :delete :close", "действия с записью"),
+        key_line(":all :recent", "фильтр todo (все / 5 дней)"),
+        key_line(":q", "выход"),
         Line::from(""),
         Line::from(Span::styled("Советы", theme::accent())),
         Line::from(""),
         Line::from(Span::styled(
-            "  Напоминания срабатывают автоматически",
+            "• Напоминания → popup + звук при сроке",
             theme::subtext(),
         )),
         Line::from(Span::styled(
-            "  при наступлении времени → popup + звук.",
+            "• Todo показывает последние 5 дней",
             theme::subtext(),
         )),
         Line::from(Span::styled(
-            "  Бэкенд должен быть запущен (./run.sh).",
+            "• Docs: проекты раскрываются как папки",
             theme::subtext(),
         )),
     ];
@@ -279,40 +378,134 @@ fn render_help(f: &mut Frame, area: Rect) {
     f.render_widget(p, area);
 }
 
+fn key_line(key: &str, desc: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("  {key:<22}"), theme::info()),
+        Span::styled(desc.to_string(), theme::subtext()),
+    ])
+}
+
+// ─── overlays ────────────────────────────────────────────────────────
+
+fn render_detail_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let Some(v) = app.opened.as_ref() else { return };
+    let popup = centered_rect(90, 85, area);
+    f.render_widget(Clear, popup);
+
+    // Content: markdown if note/page, else structured text
+    let is_md = app.tab == Tab::Notes || app.tab == Tab::Docs;
+    let body = if is_md {
+        let md = v["content"].as_str().unwrap_or("");
+        markdown::render(md)
+    } else {
+        Text::from(format_detail(app.tab, v))
+    };
+
+    let title = v["title"]
+        .as_str()
+        .or_else(|| v["text"].as_str())
+        .unwrap_or("detail");
+    let title_full = format!("{title}  (Esc close · d delete · j/k scroll)");
+
+    let p = Paragraph::new(body)
+        .wrap(Wrap { trim: false })
+        .block(theme::block_focused(&title_full))
+        .scroll((app.detail_scroll, 0));
+    f.render_widget(p, popup);
+}
+
+fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
+    let label = match &app.confirm {
+        Some(PendingConfirm::Delete(_, _, l)) => format!("Удалить {l}?"),
+        None => return,
+    };
+    let popup = centered_rect(50, 20, area);
+    f.render_widget(Clear, popup);
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(label, theme::warn())),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [y] ", theme::ok()),
+            Span::styled("да    ", theme::text()),
+            Span::styled("[n] ", theme::error()),
+            Span::styled("отмена", theme::text()),
+        ]),
+    ];
+    let p = Paragraph::new(text)
+        .alignment(Alignment::Center)
+        .block(theme::block_focused("confirm"));
+    f.render_widget(p, popup);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vert[1])[1]
+}
+
 // ─── status bar ──────────────────────────────────────────────────────
 
 fn render_statusbar(f: &mut Frame, app: &App, area: Rect) {
-    let mode = match app.mode {
+    let (mode_str, mode_style) = match app.mode {
         Mode::Normal => ("NORMAL", theme::info()),
         Mode::Ingest => ("INGEST", theme::warn()),
         Mode::Search => ("SEARCH", theme::link()),
+        Mode::Command => ("CMD", theme::accent()),
+        Mode::Confirm => ("CONFIRM", theme::error()),
     };
 
-    let hint = match app.mode {
-        Mode::Normal => "h/l tabs · j/k nav · i write · / search · r refresh · q quit",
-        Mode::Ingest => "Enter → send   Esc → cancel",
-        Mode::Search => "type to filter · Esc cancel · Enter apply",
-    };
+    let mut spans = vec![Span::styled(
+        format!(" {mode_str} "),
+        mode_style.add_modifier(Modifier::BOLD),
+    )];
 
-    let mut spans = vec![
-        Span::styled(format!(" {} ", mode.0), mode.1.add_modifier(Modifier::BOLD)),
-        Span::styled(" ", theme::text()),
-    ];
-    if app.loading {
-        spans.push(Span::styled(
-            format!("{} ", app.spinner_frame()),
-            theme::warn(),
-        ));
+    // Command input appears in the status bar
+    if app.mode == Mode::Command {
+        spans.push(Span::styled(" :", theme::accent()));
+        spans.push(Span::styled(app.command.clone(), theme::text()));
+        spans.push(Span::styled("_", theme::accent()));
+    } else {
+        spans.push(Span::raw(" "));
+        if app.loading {
+            spans.push(Span::styled(
+                format!("{} ", app.spinner_frame()),
+                theme::warn(),
+            ));
+        }
+        spans.push(Span::styled(app.status.clone(), theme::subtext()));
+        spans.push(Span::styled(" · ", theme::overlay()));
+        spans.push(Span::styled(hint_for_mode(app.mode), theme::overlay()));
     }
-    spans.push(Span::styled(app.status.clone(), theme::subtext()));
-    spans.push(Span::styled(" · ", theme::overlay()));
-    spans.push(Span::styled(hint, theme::overlay()));
 
     let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::MANTLE));
     f.render_widget(p, area);
 }
 
-// ─── rows for each tab ──────────────────────────────────────────────
+fn hint_for_mode(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Normal => "Tab focus · 1-6 tabs · j/k nav · Enter open · Space done · d delete · : cmd · / search · i write · q quit",
+        Mode::Ingest => "Enter → send · Esc → cancel",
+        Mode::Search => "type to filter · Esc cancel · Enter apply",
+        Mode::Command => "Enter → run · Esc → cancel",
+        Mode::Confirm => "y → yes · n / Esc → cancel",
+    }
+}
+
+// ─── rows per tab ────────────────────────────────────────────────────
 
 fn row_for_tab(tab: Tab, v: &Value) -> Line<'static> {
     match tab {
@@ -320,8 +513,7 @@ fn row_for_tab(tab: Tab, v: &Value) -> Line<'static> {
         Tab::Todos => todo_row(v),
         Tab::Reminders => reminder_row(v),
         Tab::Learning => track_row(v),
-        Tab::Docs => project_row(v),
-        Tab::Inbox => Line::from(""),
+        Tab::Docs | Tab::Inbox => Line::from(""),
     }
 }
 
@@ -351,7 +543,11 @@ fn todo_row(v: &Value) -> Line<'static> {
     } else {
         (indicators::SQ_EMPTY, theme::warn())
     };
-    let title_style = if done { theme::overlay() } else { theme::text() };
+    let title_style = if done {
+        theme::overlay().add_modifier(Modifier::CROSSED_OUT)
+    } else {
+        theme::text()
+    };
     let title = truncate(v["title"].as_str().unwrap_or(""), 40);
     let due = v["due_at"].as_str().unwrap_or("").to_string();
     Line::from(vec![
@@ -393,47 +589,24 @@ fn track_row(v: &Value) -> Line<'static> {
     ])
 }
 
-fn project_row(v: &Value) -> Line<'static> {
-    let slug = v["slug"].as_str().unwrap_or("");
-    let title = truncate(v["title"].as_str().unwrap_or(""), 36);
-    Line::from(vec![
-        Span::styled(indicators::SQ_FILLED, theme::link()),
-        Span::raw(" "),
-        Span::styled(format!("{slug:<18}"), theme::accent()),
-        Span::raw(" "),
-        Span::styled(title, theme::text()),
-    ])
-}
-
-// ─── detail formatters ───────────────────────────────────────────────
+// ─── detail formatters (non-markdown) ───────────────────────────────
 
 fn format_detail(tab: Tab, v: &Value) -> String {
     match tab {
-        Tab::Notes => {
-            format!(
-                "# {}\n\ntags: {}\nid: {}\n\n{}",
-                v["title"].as_str().unwrap_or(""),
-                v["tags"]
-                    .as_array()
-                    .map(|a| a
-                        .iter()
-                        .filter_map(|x| x.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "))
-                    .unwrap_or_default(),
-                v["id"].as_str().unwrap_or(""),
-                v["content"].as_str().unwrap_or("")
-            )
-        }
+        Tab::Notes => format!(
+            "{}\n{}\n",
+            format_detail_meta_note(v),
+            v["content"].as_str().unwrap_or("")
+        ),
         Tab::Todos => format!(
-            "{}\n\ndone: {}\ndue: {}\nid: {}",
+            "{}\n\ndone: {}\ndue:  {}\nid:   {}",
             v["title"].as_str().unwrap_or(""),
             v["done"].as_bool().unwrap_or(false),
             v["due_at"].as_str().unwrap_or("—"),
             v["id"].as_str().unwrap_or("")
         ),
         Tab::Reminders => format!(
-            "{}\n\nremind_at: {}\nfired: {}\nid: {}",
+            "{}\n\nremind_at: {}\nfired:     {}\nid:        {}",
             v["text"].as_str().unwrap_or(""),
             v["remind_at"].as_str().unwrap_or(""),
             v["fired"].as_bool().unwrap_or(false),
@@ -459,8 +632,34 @@ fn format_detail(tab: Tab, v: &Value) -> String {
     }
 }
 
+fn format_detail_meta_note(v: &Value) -> String {
+    let tags = v["tags"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    format!(
+        "tags: {}\nid:   {}\nupd:  {}\n",
+        tags,
+        v["id"].as_str().unwrap_or(""),
+        v["updated_at"].as_str().unwrap_or("")
+    )
+}
+
+fn format_detail_meta_page(v: &Value) -> String {
+    format!(
+        "id: {}\nv:  {}\nupd: {}",
+        v["id"].as_str().unwrap_or(""),
+        v["version"].as_i64().unwrap_or(1),
+        v["updated_at"].as_str().unwrap_or("")
+    )
+}
+
 fn format_ingest_result(v: &Value) -> String {
-    // Multi-item?
     if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
         let mut out = format!("[+] classified {} items:\n\n", items.len());
         for (i, it) in items.iter().enumerate() {
@@ -482,8 +681,6 @@ fn format_ingest_result(v: &Value) -> String {
         .unwrap_or("?");
     format!("[+] {kind}: {title}")
 }
-
-// ─── helpers ─────────────────────────────────────────────────────────
 
 fn truncate(s: &str, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();

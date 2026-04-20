@@ -1,21 +1,23 @@
 //! cozby-tui — event-driven terminal UI.
 //!
-//! Главный цикл: читает terminal-events + app-events параллельно.
-//! Сеть/LLM-вызовы идут в фоне через [`worker`], UI не блокируется.
-//!
-//! Клавиши (Normal mode):
-//!   h/l, ←/→, Tab    переключение вкладок
-//!   j/k, ↓/↑          навигация по списку
-//!   g / G             первый / последний элемент
-//!   i                 ingest-режим (chat-field)
-//!   /                 search-режим (фильтр списка)
-//!   r                 refresh текущей вкладки
-//!   q / Esc           выход
-//!
-//! В Ingest / Search: Enter → submit, Esc → отмена.
+//! Управление (Normal mode):
+//!   Tab / Shift+Tab      цикл фокуса (sidebar → list → detail)
+//!   ]t / [t  или  1-6    смена вкладок
+//!   j / k   ↓ / ↑         навигация
+//!   g / G                 первый / последний
+//!   Enter  /  o           открыть запись (detail или раскрыть проект в Docs)
+//!   Space                 toggle done (для todo)
+//!   d                     удалить (с подтверждением y/n)
+//!   i                     ingest
+//!   /                     search-фильтр
+//!   :                     командный режим (:notes, :docs, :all, :recent, :q, …)
+//!   r                     refresh
+//!   Esc                   закрыть detail / отменить ввод
+//!   q                     выход (только если ничего не открыто)
 
 mod app;
 mod indicators;
+mod markdown;
 mod theme;
 mod views;
 
@@ -35,7 +37,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
-use crate::app::{spawn_worker, App, AppCmd, AppEvent, Mode, Tab};
+use crate::app::{spawn_worker, App, AppCmd, AppEvent, Focus, Mode, Tab};
 
 #[derive(Parser)]
 #[command(name = "cozby-tui", about = "Terminal UI for cozby-brain")]
@@ -48,27 +50,23 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Channels
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<AppCmd>();
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<AppEvent>();
 
-    // Worker (API client)
     let api_for_worker = cli.api.clone();
     tokio::spawn(async move {
         spawn_worker(api_for_worker, cmd_rx, ev_tx).await;
     });
 
     let mut app = App::new(cli.api.clone(), cmd_tx.clone());
-    // initial ping + default tab
     let _ = cmd_tx.send(AppCmd::Ping);
-    app.switch_tab(Tab::Notes); // triggers refresh
+    app.switch_tab(Tab::Notes);
 
     let res = run(&mut terminal, &mut app, &mut ev_rx).await;
 
@@ -93,26 +91,23 @@ async fn run<B: ratatui::backend::Backend>(
 ) -> Result<()> {
     let mut last_tick = std::time::Instant::now();
     let tick_period = Duration::from_millis(90);
+    let mut pending_tab_key = false; // for `]t` / `[t`
 
     loop {
         terminal.draw(|f| views::render(f, app))?;
 
-        // Poll terminal + channel concurrently.
-        // crossterm::event::poll is blocking, so wrap in spawn_blocking? No —
-        // just use short poll timeout and check channel afterwards.
         let timeout = tick_period
             .checked_sub(last_tick.elapsed())
             .unwrap_or(Duration::from_millis(10));
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                if !handle_key(app, key.code, key.modifiers) {
+                if !handle_key(app, key.code, key.modifiers, &mut pending_tab_key) {
                     break;
                 }
             }
         }
 
-        // Drain app events (non-blocking).
         while let Ok(ev) = ev_rx.try_recv() {
             apply_event(app, ev);
         }
@@ -134,23 +129,40 @@ fn apply_event(app: &mut App, ev: AppEvent) {
                 app.items = items;
                 app.selected = 0;
                 app.loading = false;
-                app.status = format!("{} · loaded {}", tab.label(), app.items.len());
+                app.status = format!("{} · {} items", tab.label(), app.items.len());
             }
+        }
+        AppEvent::PagesLoaded(project_id, pages) => {
+            app.doc_pages.insert(project_id, pages);
+            app.loading = false;
+        }
+        AppEvent::NoteDetail(v) => {
+            app.opened = Some(v);
+            app.focus = Focus::Detail;
+            app.loading = false;
+            app.detail_scroll = 0;
+        }
+        AppEvent::PageDetail(v) => {
+            app.opened = Some(v);
+            app.focus = Focus::Detail;
+            app.loading = false;
+            app.detail_scroll = 0;
         }
         AppEvent::Ingested(v) => {
             app.last_ingest = Some(v.clone());
             app.loading = false;
-            // Описать что пришло
             let label = if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
                 format!("classified {} items", items.len())
             } else if let Some(kind) = v.get("type").and_then(|x| x.as_str()) {
-                format!("{kind} created")
+                format!("{kind} saved")
             } else {
                 "ingested".into()
             };
             app.status = label;
-            // refresh current tab в фоне
             app.refresh();
+        }
+        AppEvent::Deleted(_, _) => {
+            app.status = "deleted".into();
         }
         AppEvent::Pong(ok) => {
             app.connected = ok;
@@ -162,52 +174,143 @@ fn apply_event(app: &mut App, ev: AppEvent) {
             app.loading = false;
             app.status = format!("ошибка: {e}");
         }
-        AppEvent::Tick => {
-            app.tick();
-        }
+        AppEvent::Tick => app.tick(),
     }
 }
 
-/// Returns false if app should exit.
-fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
-    // Ctrl+C — всегда выход
+/// Returns false to exit.
+fn handle_key(
+    app: &mut App,
+    code: KeyCode,
+    mods: KeyModifiers,
+    pending_tab_key: &mut bool,
+) -> bool {
     if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
         return false;
     }
 
     match app.mode {
-        Mode::Normal => handle_normal(app, code),
+        Mode::Normal => handle_normal(app, code, pending_tab_key),
         Mode::Ingest => handle_ingest(app, code),
         Mode::Search => handle_search(app, code),
+        Mode::Command => handle_command(app, code),
+        Mode::Confirm => handle_confirm(app, code),
     }
 }
 
-fn handle_normal(app: &mut App, code: KeyCode) -> bool {
-    match code {
-        KeyCode::Char('q') | KeyCode::Esc => return false,
-        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => app.next_tab(),
-        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => app.prev_tab(),
-        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
-        KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
-        KeyCode::Char('g') => app.select_first(),
-        KeyCode::Char('G') => app.select_last(),
-        KeyCode::Char('r') => app.refresh(),
-        KeyCode::Char('i') => {
-            app.tab = Tab::Inbox;
+fn handle_normal(app: &mut App, code: KeyCode, pending_tab_key: &mut bool) -> bool {
+    // `]t` / `[t` — next/prev tab (pending-key state)
+    if *pending_tab_key {
+        *pending_tab_key = false;
+        if matches!(code, KeyCode::Char('t')) {
+            // just consumed — nothing else
+            return true;
+        }
+    }
+
+    // Detail overlay?
+    if app.opened.is_some() {
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') => app.close_detail(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.detail_scroll = app.detail_scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.detail_scroll = app.detail_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                app.detail_scroll = app.detail_scroll.saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                app.detail_scroll = app.detail_scroll.saturating_sub(10);
+            }
+            KeyCode::Char('g') => app.detail_scroll = 0,
+            KeyCode::Char('d') => app.request_delete(),
+            KeyCode::Char(':') => {
+                app.mode = Mode::Command;
+                app.command.clear();
+            }
+            _ => {}
+        }
+        return true;
+    }
+
+    match (app.focus, code) {
+        (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => return false,
+        (_, KeyCode::Tab) => app.focus = app.focus.next(),
+        (_, KeyCode::BackTab) => app.focus = app.focus.prev(),
+        (_, KeyCode::Char(':')) => {
+            app.mode = Mode::Command;
+            app.command.clear();
+        }
+        (_, KeyCode::Char('i')) => {
+            app.switch_tab(Tab::Inbox);
             app.mode = Mode::Ingest;
             app.input.clear();
         }
-        KeyCode::Char('/') => {
+        (_, KeyCode::Char('/')) => {
             app.mode = Mode::Search;
             app.search.clear();
         }
-        // Быстрые переходы на вкладки по первой букве
-        KeyCode::Char('1') => app.switch_tab(Tab::Inbox),
-        KeyCode::Char('2') => app.switch_tab(Tab::Notes),
-        KeyCode::Char('3') => app.switch_tab(Tab::Todos),
-        KeyCode::Char('4') => app.switch_tab(Tab::Reminders),
-        KeyCode::Char('5') => app.switch_tab(Tab::Learning),
-        KeyCode::Char('6') => app.switch_tab(Tab::Docs),
+        (_, KeyCode::Char('r')) => app.refresh(),
+        // Quick tab switching
+        (_, KeyCode::Char('1')) => app.switch_tab(Tab::Inbox),
+        (_, KeyCode::Char('2')) => app.switch_tab(Tab::Notes),
+        (_, KeyCode::Char('3')) => app.switch_tab(Tab::Todos),
+        (_, KeyCode::Char('4')) => app.switch_tab(Tab::Reminders),
+        (_, KeyCode::Char('5')) => app.switch_tab(Tab::Learning),
+        (_, KeyCode::Char('6')) => app.switch_tab(Tab::Docs),
+        // `]` prepares for `]t`
+        (_, KeyCode::Char(']')) => {
+            app.next_tab();
+        }
+        (_, KeyCode::Char('[')) => {
+            app.prev_tab();
+        }
+
+        // ── Focus-specific ──
+        (Focus::Sidebar, KeyCode::Down) | (Focus::Sidebar, KeyCode::Char('j')) => {
+            app.next_tab();
+        }
+        (Focus::Sidebar, KeyCode::Up) | (Focus::Sidebar, KeyCode::Char('k')) => {
+            app.prev_tab();
+        }
+        (Focus::Sidebar, KeyCode::Enter) | (Focus::Sidebar, KeyCode::Right) => {
+            app.focus = Focus::List;
+        }
+
+        (Focus::List, KeyCode::Down) | (Focus::List, KeyCode::Char('j')) => app.select_next(),
+        (Focus::List, KeyCode::Up) | (Focus::List, KeyCode::Char('k')) => app.select_prev(),
+        (Focus::List, KeyCode::Char('g')) => app.select_first(),
+        (Focus::List, KeyCode::Char('G')) => app.select_last(),
+        (Focus::List, KeyCode::Enter) | (Focus::List, KeyCode::Char('o')) => app.open_selected(),
+        (Focus::List, KeyCode::Char(' ')) => app.toggle_todo_done(),
+        (Focus::List, KeyCode::Char('d')) | (Focus::List, KeyCode::Char('x')) => {
+            app.request_delete()
+        }
+        (Focus::List, KeyCode::Left) | (Focus::List, KeyCode::Char('h')) => {
+            app.focus = Focus::Sidebar;
+        }
+        (Focus::List, KeyCode::Right) | (Focus::List, KeyCode::Char('l')) => {
+            app.focus = Focus::Detail;
+        }
+
+        (Focus::Detail, KeyCode::Down) | (Focus::Detail, KeyCode::Char('j')) => {
+            app.detail_scroll = app.detail_scroll.saturating_add(1);
+        }
+        (Focus::Detail, KeyCode::Up) | (Focus::Detail, KeyCode::Char('k')) => {
+            app.detail_scroll = app.detail_scroll.saturating_sub(1);
+        }
+        (Focus::Detail, KeyCode::PageDown) => {
+            app.detail_scroll = app.detail_scroll.saturating_add(10);
+        }
+        (Focus::Detail, KeyCode::PageUp) => {
+            app.detail_scroll = app.detail_scroll.saturating_sub(10);
+        }
+        (Focus::Detail, KeyCode::Left) | (Focus::Detail, KeyCode::Char('h')) => {
+            app.focus = Focus::List;
+        }
+
         _ => {}
     }
     true
@@ -220,8 +323,7 @@ fn handle_ingest(app: &mut App, code: KeyCode) -> bool {
             app.input.clear();
         }
         KeyCode::Enter => {
-            let text = std::mem::take(&mut app.input);
-            let text = text.trim().to_string();
+            let text = std::mem::take(&mut app.input).trim().to_string();
             app.mode = Mode::Normal;
             if !text.is_empty() {
                 app.loading = true;
@@ -256,6 +358,45 @@ fn handle_search(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Backspace => {
             app.search.pop();
             app.selected = 0;
+        }
+        _ => {}
+    }
+    true
+}
+
+fn handle_command(app: &mut App, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.command.clear();
+        }
+        KeyCode::Enter => {
+            let cmd = std::mem::take(&mut app.command);
+            let is_quit = matches!(cmd.as_str(), "q" | "quit" | "exit");
+            if !is_quit {
+                app.run_command(&cmd);
+                app.mode = Mode::Normal;
+            }
+            if is_quit {
+                return false;
+            }
+        }
+        KeyCode::Char(c) => app.command.push(c),
+        KeyCode::Backspace => {
+            app.command.pop();
+        }
+        _ => {}
+    }
+    true
+}
+
+fn handle_confirm(app: &mut App, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            app.confirm_yes();
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.confirm_no();
         }
         _ => {}
     }
