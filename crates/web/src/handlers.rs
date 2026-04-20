@@ -28,6 +28,85 @@ fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, Json<serde_json::Value>)
     )
 }
 
+// ─── RAG helpers ─────────────────────────────────────────────────────
+
+/// Fire-and-forget: embed + upsert into Qdrant. Errors are logged only.
+/// Spawns a background task — returns immediately.
+pub(crate) fn index_async(
+    state: AppState,
+    id: String,
+    kind: &'static str,
+    title: String,
+    content: String,
+    tags: Vec<String>,
+) {
+    tokio::spawn(async move {
+        match state.embedding.embed(&content).await {
+            Ok(vector) => {
+                if let Err(e) = state
+                    .vector
+                    .upsert(&id, kind, vector, &title, &tags)
+                    .await
+                {
+                    tracing::warn!(%id, kind, error = %e, "qdrant upsert failed");
+                }
+            }
+            Err(LlmError::NotConfigured) => {}
+            Err(e) => tracing::warn!(%id, kind, error = %e, "embed failed (skip index)"),
+        }
+    });
+}
+
+/// Fire-and-forget delete from vector store.
+pub(crate) fn unindex_async(state: AppState, id: String) {
+    tokio::spawn(async move {
+        if let Err(e) = state.vector.delete(&id).await {
+            tracing::warn!(%id, error = %e, "qdrant delete failed");
+        }
+    });
+}
+
+/// Fetch top-5 similar existing notes + doc_pages, return as compact tuples
+/// `(kind, title, tags, preview)` for feeding into classifier context.
+/// Returns empty Vec if embedding/vector are not configured or return nothing.
+async fn gather_context_items(
+    state: &AppState,
+    raw: &str,
+) -> Vec<(String, String, String, String)> {
+    let vector = match state.embedding.embed(raw).await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let hits = state.vector.search(vector, 5).await.unwrap_or_default();
+    if hits.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for hit in hits {
+        match hit.kind.as_str() {
+            application::ports::KIND_NOTE => {
+                if let Ok(Some(n)) = call!(state.note_actor, NoteMsg::Get, hit.id.clone()) {
+                    let tags = n.tags.join(", ");
+                    let preview = n.content.lines().next().unwrap_or("").to_string();
+                    out.push(("note".to_string(), n.title, tags, preview));
+                }
+            }
+            application::ports::KIND_DOC_PAGE => {
+                if let Ok(Some(p)) =
+                    call!(state.doc_actor, actors::doc_actor::DocMsg::GetPage, hit.id.clone())
+                {
+                    let tags = p.tags.join(", ");
+                    let preview = p.content.lines().next().unwrap_or("").to_string();
+                    out.push(("doc".to_string(), p.title, tags, preview));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 pub async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
 }
@@ -47,11 +126,21 @@ pub async fn create_note(
 ) -> impl IntoResponse {
     tracing::debug!(title = %dto.title, tags = ?dto.tags, "create note");
     match call!(state.note_actor, NoteMsg::Create, dto.title, dto.content, dto.tags) {
-        Ok(Ok(note)) => (
-            StatusCode::CREATED,
-            Json(json!({ "status": "ok", "data": note })),
-        )
-            .into_response(),
+        Ok(Ok(note)) => {
+            index_async(
+                state.clone(),
+                note.id.clone(),
+                application::ports::KIND_NOTE,
+                note.title.clone(),
+                note.content.clone(),
+                note.tags.clone(),
+            );
+            (
+                StatusCode::CREATED,
+                Json(json!({ "status": "ok", "data": note })),
+            )
+                .into_response()
+        }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
         Err(e) => internal(e).into_response(),
     }
@@ -81,7 +170,17 @@ pub async fn update_note(
     Json(dto): Json<UpdateNoteDto>,
 ) -> impl IntoResponse {
     match call!(state.note_actor, NoteMsg::Update, id, dto.title, dto.content, dto.tags) {
-        Ok(Ok(note)) => (StatusCode::OK, Json(json!({ "status": "ok", "data": note }))).into_response(),
+        Ok(Ok(note)) => {
+            index_async(
+                state.clone(),
+                note.id.clone(),
+                application::ports::KIND_NOTE,
+                note.title.clone(),
+                note.content.clone(),
+                note.tags.clone(),
+            );
+            (StatusCode::OK, Json(json!({ "status": "ok", "data": note }))).into_response()
+        }
         Ok(Err(e)) if e.starts_with("not found") => {
             (StatusCode::NOT_FOUND, Json(json!({ "error": e }))).into_response()
         }
@@ -94,8 +193,11 @@ pub async fn delete_note(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match call!(state.note_actor, NoteMsg::Delete, id) {
-        Ok(Ok(())) => (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response(),
+    match call!(state.note_actor, NoteMsg::Delete, id.clone()) {
+        Ok(Ok(())) => {
+            unindex_async(state.clone(), id);
+            (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
+        }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
         Err(e) => internal(e).into_response(),
     }
@@ -202,10 +304,17 @@ pub async fn ingest(
 ) -> impl IntoResponse {
     tracing::debug!(len = dto.raw.len(), llm = state.llm.name(), "universal ingest");
 
-    let classified = match llm_use_cases::classify_and_structure(
+    // RAG-aware: fetch top-5 similar existing items to inform the classifier
+    let context_items = gather_context_items(&state, &dto.raw).await;
+    if !context_items.is_empty() {
+        tracing::debug!(context_count = context_items.len(), "ingest: feeding context to classifier");
+    }
+
+    let classified = match llm_use_cases::classify_and_structure_with_context(
         state.llm.as_ref(),
         &dto.raw,
         Utc::now(),
+        &context_items,
     )
     .await
     {
@@ -307,11 +416,21 @@ pub async fn ingest(
                     d.section_title,
                     author
                 ) {
-                    Ok(Ok(page)) => json!({
-                        "type": "doc",
-                        "status": "ok",
-                        "data": page,
-                    }),
+                    Ok(Ok(page)) => {
+                        index_async(
+                            state.clone(),
+                            page.id.clone(),
+                            application::ports::KIND_DOC_PAGE,
+                            page.title.clone(),
+                            page.content.clone(),
+                            page.tags.clone(),
+                        );
+                        json!({
+                            "type": "doc",
+                            "status": "ok",
+                            "data": page,
+                        })
+                    }
                     Ok(Err(e)) => json!({ "type": "doc", "status": "error", "error": e }),
                     Err(e) => json!({ "type": "doc", "status": "error", "error": format!("{e}") }),
                 }
@@ -440,7 +559,16 @@ pub async fn confirm_ingest_note(
             let note_tags = note.tags.clone();
             tokio::spawn(async move {
                 if let Ok(vector) = emb.embed(&note_content).await {
-                    if let Err(e) = vec_store.upsert(&note_id, vector, &note_title, &note_tags).await {
+                    if let Err(e) = vec_store
+                        .upsert(
+                            &note_id,
+                            application::ports::KIND_NOTE,
+                            vector,
+                            &note_title,
+                            &note_tags,
+                        )
+                        .await
+                    {
                         tracing::warn!(error = %e, "qdrant upsert failed (fire-and-forget)");
                     }
                 }
@@ -565,67 +693,187 @@ async fn search_with_filters(
     (notes, todos, reminders)
 }
 
-/// Unified smart search — understands keywords + status filters + time windows.
+/// RAG Q&A — embed question, retrieve top-K notes + doc pages,
+/// feed content to LLM as context, return generated answer + citations.
+///
+/// Flow:
+///   1. Classify question (keywords + scope + filters + status/time_window)
+///   2. Keyword search (classic ILIKE) — for todos/reminders (short text, no RAG needed)
+///   3. Vector search — top-6 similar notes + doc_pages (RAG context)
+///   4. Fetch full content for top hits
+///   5. LLM generates answer grounded in fetched context
+///   6. Return { answer, sources, keyword-filtered entities }
 pub async fn ask(
     State(state): State<AppState>,
     Query(q): Query<AskQuery>,
 ) -> impl IntoResponse {
-    tracing::debug!(query = %q.q, llm = state.llm.name(), "ask / smart search");
-    // Delegate to classifier so we get status/time_window filters too.
-    let classified = llm_use_cases::classify_and_structure(
-        state.llm.as_ref(),
-        &q.q,
-        chrono::Utc::now(),
-    )
-    .await;
+    tracing::debug!(query = %q.q, llm = state.llm.name(), "ask (RAG)");
+    let now = chrono::Utc::now();
 
-    let (keywords, filters_owned) = match classified {
+    // 1. Classify — pick up filters / keywords
+    let classified = llm_use_cases::classify_and_structure(state.llm.as_ref(), &q.q, now).await;
+    let (keywords, scope_s, status_s, tw_s) = match classified {
         Ok(items) => items
             .into_iter()
             .find_map(|c| match c {
                 llm_use_cases::Classified::Question(qq) => Some(qq),
                 _ => None,
             })
-            .map(|qq| {
-                (
-                    qq.keywords,
-                    (qq.scope, qq.status, qq.time_window),
-                )
-            })
-            .unwrap_or_else(|| {
-                // not classified as question — fall back to keyword extraction
-                (Vec::new(), ("all".to_string(), None, None))
-            }),
+            .map(|qq| (qq.keywords, qq.scope, qq.status, qq.time_window))
+            .unwrap_or_else(|| (Vec::new(), "all".to_string(), None, None)),
         Err(_) => {
-            let kw =
-                llm_use_cases::extract_search_keywords(state.llm.as_ref(), &q.q).await;
-            (kw, ("all".to_string(), None, None))
+            let kw = llm_use_cases::extract_search_keywords(state.llm.as_ref(), &q.q).await;
+            (kw, "all".to_string(), None, None)
         }
     };
 
-    let (scope_s, status_s, tw_s) = filters_owned;
+    // 2. Keyword-based search for todos / reminders (short text — no embedding needed)
     let filters = QueryFilters {
         scope: &scope_s,
         status: status_s.as_deref(),
         time_window: tw_s.as_deref(),
     };
-    let (notes, todos, reminders) = search_with_filters(&state, &keywords, filters).await;
+    let (kw_notes, todos, reminders) =
+        search_with_filters(&state, &keywords, filters).await;
+
+    // 3. RAG — embed query, search top-K across notes + doc_pages
+    let (rag_sources, rag_answer) =
+        rag_answer(&state, &q.q).await.unwrap_or((Vec::new(), None));
+
     (
         StatusCode::OK,
         Json(json!({
             "status": "ok",
+            "question": q.q,
+            "answer": rag_answer,
+            "sources": rag_sources,
             "keywords": keywords,
             "scope": scope_s,
             "status_filter": status_s,
             "time_window": tw_s,
             "data": {
-                "notes": notes,
+                "notes": kw_notes,
                 "todos": todos,
                 "reminders": reminders,
             }
         })),
     )
         .into_response()
+}
+
+/// Retrieve-augmented generation for a question.
+/// Returns `(sources, answer)` — sources are always provided if vector search
+/// worked, answer may be None if LLM/embedding not configured.
+async fn rag_answer(
+    state: &AppState,
+    question: &str,
+) -> Option<(Vec<serde_json::Value>, Option<String>)> {
+    // 1. Embed
+    let vector = match state.embedding.embed(question).await {
+        Ok(v) => v,
+        Err(e) => {
+            if !matches!(e, LlmError::NotConfigured) {
+                tracing::warn!(error = %e, "rag: embed failed");
+            }
+            return None;
+        }
+    };
+
+    // 2. Search across all kinds
+    let hits = state.vector.search(vector, 6).await.unwrap_or_default();
+    if hits.is_empty() {
+        return Some((Vec::new(), None));
+    }
+
+    // 3. Fetch full content for each hit
+    let mut context_items: Vec<(String, String, String, String, f32)> = Vec::new(); // (kind, id, title, content, score)
+    for hit in &hits {
+        match hit.kind.as_str() {
+            application::ports::KIND_NOTE => {
+                if let Ok(Some(n)) =
+                    call!(state.note_actor, NoteMsg::Get, hit.id.clone())
+                {
+                    context_items.push((
+                        "note".into(),
+                        n.id,
+                        n.title,
+                        n.content,
+                        hit.score,
+                    ));
+                }
+            }
+            application::ports::KIND_DOC_PAGE => {
+                if let Ok(Some(p)) =
+                    call!(state.doc_actor, actors::doc_actor::DocMsg::GetPage, hit.id.clone())
+                {
+                    context_items.push((
+                        "doc_page".into(),
+                        p.id,
+                        p.title,
+                        p.content,
+                        hit.score,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if context_items.is_empty() {
+        return Some((Vec::new(), None));
+    }
+
+    // 4. Build context, cap each item to 2000 chars to fit LLM window
+    let context_text = context_items
+        .iter()
+        .enumerate()
+        .map(|(i, (kind, _id, title, content, _score))| {
+            let body = if content.chars().count() > 2000 {
+                let truncated: String = content.chars().take(2000).collect();
+                format!("{truncated}…")
+            } else {
+                content.clone()
+            };
+            format!("[{}] ({kind}) {title}\n{body}", i + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+
+    // 5. LLM — grounded answer
+    let system = "Ты — AI-помощник пользователя. Отвечай ТОЛЬКО на основе данных из контекста \
+                  (пользовательские заметки и документация). Правила:\n\
+                  - Если в контексте нет ответа — честно скажи \"В моих записях про это нет.\"\n\
+                  - Цитируй источники в формате [1], [2] в конце предложений.\n\
+                  - Ответ краткий и по делу, 2-5 предложений. Не выдумывай фактов.\n\
+                  - Отвечай на том же языке что и вопрос.\n\
+                  - Не пиши chain-of-thought, не анализируй задачу, сразу ответ.";
+    let user_msg = format!("Контекст:\n\n{context_text}\n\nВопрос: {question}");
+
+    let answer = match state.llm.complete_text(system, &user_msg).await {
+        Ok(text) => Some(text.trim().to_string()),
+        Err(e) => {
+            if !matches!(e, LlmError::NotConfigured) {
+                tracing::warn!(error = %e, "rag: llm answer failed");
+            }
+            None
+        }
+    };
+
+    let sources: Vec<serde_json::Value> = context_items
+        .into_iter()
+        .enumerate()
+        .map(|(i, (kind, id, title, _content, score))| {
+            json!({
+                "n": i + 1,
+                "kind": kind,
+                "id": id,
+                "title": title,
+                "score": score,
+            })
+        })
+        .collect();
+
+    Some((sources, answer))
 }
 
 fn match_any(text: &str, keywords: &[String]) -> bool {

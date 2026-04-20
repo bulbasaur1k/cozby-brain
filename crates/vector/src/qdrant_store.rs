@@ -1,16 +1,20 @@
 //! Qdrant vector store — gRPC adapter via `qdrant-client`.
+//!
+//! Единая коллекция содержит все типы записей (notes, doc_pages, и т.д.).
+//! Тип хранится в payload `kind`, по нему можно фильтровать.
 
 use async_trait::async_trait;
 use qdrant_client::qdrant::{
-    point_id, value, CreateCollectionBuilder, DeletePointsBuilder, Distance, PointStruct,
-    PointsIdsList, SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
+    point_id, r#match::MatchValue, value, Condition, CreateCollectionBuilder,
+    DeletePointsBuilder, Distance, FieldCondition, Filter, Match, PointStruct, PointsIdsList,
+    SearchPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
 };
 use qdrant_client::Qdrant;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-use application::ports::{RepoError, SimilarNote, VectorStore};
+use application::ports::{RepoError, SimilarItem, VectorStore};
 
 pub struct QdrantVectorStore {
     client: Arc<Qdrant>,
@@ -52,6 +56,39 @@ impl QdrantVectorStore {
             .await
             .copied()
     }
+
+    fn hit_to_similar(hit: qdrant_client::qdrant::ScoredPoint) -> SimilarItem {
+        let id = match hit.id {
+            Some(pid) => match pid.point_id_options {
+                Some(point_id::PointIdOptions::Uuid(u)) => u,
+                Some(point_id::PointIdOptions::Num(n)) => n.to_string(),
+                None => String::new(),
+            },
+            None => String::new(),
+        };
+        let title = hit
+            .payload
+            .get("title")
+            .and_then(|v| match &v.kind {
+                Some(value::Kind::StringValue(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let kind = hit
+            .payload
+            .get("kind")
+            .and_then(|v| match &v.kind {
+                Some(value::Kind::StringValue(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "note".to_string()); // legacy points
+        SimilarItem {
+            id,
+            kind,
+            title,
+            score: hit.score,
+        }
+    }
 }
 
 #[async_trait]
@@ -59,12 +96,13 @@ impl VectorStore for QdrantVectorStore {
     async fn upsert(
         &self,
         id: &str,
+        kind: &str,
         vector: Vec<f32>,
         title: &str,
         tags: &[String],
     ) -> Result<(), RepoError> {
         self.ensure_collection(vector.len() as u64).await?;
-        let payload = json!({ "title": title, "tags": tags });
+        let payload = json!({ "kind": kind, "title": title, "tags": tags });
         let payload_map: std::collections::HashMap<String, qdrant_client::qdrant::Value> = payload
             .as_object()
             .cloned()
@@ -84,7 +122,7 @@ impl VectorStore for QdrantVectorStore {
         &self,
         vector: Vec<f32>,
         limit: usize,
-    ) -> Result<Vec<SimilarNote>, RepoError> {
+    ) -> Result<Vec<SimilarItem>, RepoError> {
         if !self
             .client
             .collection_exists(&self.collection)
@@ -98,37 +136,50 @@ impl VectorStore for QdrantVectorStore {
             .search_points(
                 SearchPointsBuilder::new(&self.collection, vector, limit as u64)
                     .with_payload(true)
-                    .score_threshold(0.5_f32),
+                    .score_threshold(0.4_f32),
             )
             .await
             .map_err(|e| RepoError::Vector(e.to_string()))?;
-        Ok(results
-            .result
-            .into_iter()
-            .map(|hit| {
-                let title = hit
-                    .payload
-                    .get("title")
-                    .and_then(|v| match &v.kind {
-                        Some(value::Kind::StringValue(s)) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                let id = match hit.id {
-                    Some(pid) => match pid.point_id_options {
-                        Some(point_id::PointIdOptions::Uuid(u)) => u,
-                        Some(point_id::PointIdOptions::Num(n)) => n.to_string(),
-                        None => String::new(),
-                    },
-                    None => String::new(),
-                };
-                SimilarNote {
-                    id,
-                    title,
-                    score: hit.score,
-                }
-            })
-            .collect())
+        Ok(results.result.into_iter().map(Self::hit_to_similar).collect())
+    }
+
+    async fn search_by_kind(
+        &self,
+        kind: &str,
+        vector: Vec<f32>,
+        limit: usize,
+    ) -> Result<Vec<SimilarItem>, RepoError> {
+        if !self
+            .client
+            .collection_exists(&self.collection)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(vec![]);
+        }
+        let filter = Filter::must([Condition {
+            condition_one_of: Some(
+                qdrant_client::qdrant::condition::ConditionOneOf::Field(FieldCondition {
+                    key: "kind".to_string(),
+                    r#match: Some(Match {
+                        match_value: Some(MatchValue::Keyword(kind.to_string())),
+                    }),
+                    ..Default::default()
+                }),
+            ),
+        }]);
+
+        let results = self
+            .client
+            .search_points(
+                SearchPointsBuilder::new(&self.collection, vector, limit as u64)
+                    .with_payload(true)
+                    .filter(filter)
+                    .score_threshold(0.4_f32),
+            )
+            .await
+            .map_err(|e| RepoError::Vector(e.to_string()))?;
+        Ok(results.result.into_iter().map(Self::hit_to_similar).collect())
     }
 
     async fn delete(&self, id: &str) -> Result<(), RepoError> {

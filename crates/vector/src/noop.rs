@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use application::ports::{RepoError, SimilarNote, VectorStore};
+use application::ports::{RepoError, SimilarItem, VectorStore};
 
 /// Always returns empty results. Used when Qdrant is not configured.
 pub struct NoopVectorStore;
@@ -10,6 +10,7 @@ impl VectorStore for NoopVectorStore {
     async fn upsert(
         &self,
         _id: &str,
+        _kind: &str,
         _vector: Vec<f32>,
         _title: &str,
         _tags: &[String],
@@ -21,7 +22,16 @@ impl VectorStore for NoopVectorStore {
         &self,
         _vector: Vec<f32>,
         _limit: usize,
-    ) -> Result<Vec<SimilarNote>, RepoError> {
+    ) -> Result<Vec<SimilarItem>, RepoError> {
+        Ok(vec![])
+    }
+
+    async fn search_by_kind(
+        &self,
+        _kind: &str,
+        _vector: Vec<f32>,
+        _limit: usize,
+    ) -> Result<Vec<SimilarItem>, RepoError> {
         Ok(vec![])
     }
 

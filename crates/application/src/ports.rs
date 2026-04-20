@@ -29,12 +29,22 @@ pub trait LlmClient: Send + Sync {
 
 // ---------------- Embedding / Vector store ----------------
 
+/// Kind of a vector entry — determines how server interprets the payload
+/// and where to fetch full content from when building RAG context.
+pub const KIND_NOTE: &str = "note";
+pub const KIND_DOC_PAGE: &str = "doc_page";
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SimilarNote {
+pub struct SimilarItem {
     pub id: String,
+    /// "note" | "doc_page"
+    pub kind: String,
     pub title: String,
     pub score: f32,
 }
+
+/// Back-compat alias — older call sites still use this name.
+pub type SimilarNote = SimilarItem;
 
 #[async_trait]
 pub trait EmbeddingClient: Send + Sync {
@@ -47,12 +57,21 @@ pub trait VectorStore: Send + Sync {
     async fn upsert(
         &self,
         id: &str,
+        kind: &str,
         vector: Vec<f32>,
         title: &str,
         tags: &[String],
     ) -> Result<(), RepoError>;
+    /// Search across ALL kinds. Caller can filter client-side by `kind`.
     async fn search(&self, vector: Vec<f32>, limit: usize)
-        -> Result<Vec<SimilarNote>, RepoError>;
+        -> Result<Vec<SimilarItem>, RepoError>;
+    /// Search restricted to a specific kind.
+    async fn search_by_kind(
+        &self,
+        kind: &str,
+        vector: Vec<f32>,
+        limit: usize,
+    ) -> Result<Vec<SimilarItem>, RepoError>;
     async fn delete(&self, id: &str) -> Result<(), RepoError>;
 }
 

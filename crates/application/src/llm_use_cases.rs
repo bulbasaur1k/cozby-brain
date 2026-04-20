@@ -197,9 +197,57 @@ pub async fn classify_and_structure(
     raw: &str,
     now: DateTime<Utc>,
 ) -> Result<Vec<Classified>, LlmError> {
+    classify_and_structure_with_context(llm, raw, now, &[]).await
+}
+
+/// Same as `classify_and_structure` but also feeds existing similar items
+/// to the LLM so it can avoid duplicates:
+///   - notes: suggest append to existing one with same topic
+///   - docs:  prefer append/section to an existing page
+///   - todos: skip / merge near-duplicate action
+///
+/// `context_items`: compact list of existing items as `(kind, title, tags, short_preview)`.
+pub async fn classify_and_structure_with_context(
+    llm: &dyn LlmClient,
+    raw: &str,
+    now: DateTime<Utc>,
+    context_items: &[(String, String, String, String)],
+) -> Result<Vec<Classified>, LlmError> {
+    let context_block = if context_items.is_empty() {
+        String::new()
+    } else {
+        let list = context_items
+            .iter()
+            .map(|(kind, title, tags, preview)| {
+                let prev = if preview.chars().count() > 120 {
+                    let t: String = preview.chars().take(120).collect();
+                    format!("{t}…")
+                } else {
+                    preview.clone()
+                };
+                let tags_part = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{tags}]")
+                };
+                format!("  - [{kind}]{tags_part} \"{title}\" — {prev}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nExisting items in user's knowledge base (consider these to avoid duplicates):\n\
+             {list}\n\
+             Rules when a matching item exists:\n\
+             - note: если новая информация пересекается — use type=note анно тот же title, но не создавай дубль. Пользователь потом решит мержить\n\
+             - doc:  если тема уже есть в проекте — operation=append или section, НЕ create\n\
+             - todo: если действие уже в списке — используй тот же title, пользователь увидит дубль и решит\n\
+             - всё равно возвращай полноценный items[], просто с более точными title/operation"
+        )
+    };
     let system = format!(
-        "{CLASSIFY_SYSTEM}\n\nCurrent UTC time: {}",
-        now.to_rfc3339()
+        "{CLASSIFY_SYSTEM}\n\nCurrent UTC time: {}{}",
+        now.to_rfc3339(),
+        context_block
     );
     let text = llm.complete_text(&system, raw).await?;
     let json = extract_json(&text)

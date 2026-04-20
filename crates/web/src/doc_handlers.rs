@@ -146,11 +146,21 @@ pub async fn create_page(
         dto.section_title,
         author
     ) {
-        Ok(Ok(page)) => (
-            StatusCode::CREATED,
-            Json(json!({ "status": "ok", "data": page })),
-        )
-            .into_response(),
+        Ok(Ok(page)) => {
+            crate::handlers::index_async(
+                state.clone(),
+                page.id.clone(),
+                application::ports::KIND_DOC_PAGE,
+                page.title.clone(),
+                page.content.clone(),
+                page.tags.clone(),
+            );
+            (
+                StatusCode::CREATED,
+                Json(json!({ "status": "ok", "data": page })),
+            )
+                .into_response()
+        }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
         Err(e) => internal(e).into_response(),
     }
@@ -208,8 +218,11 @@ pub async fn delete_page(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match call!(state.doc_actor, DocMsg::DeletePage, id) {
-        Ok(Ok(())) => (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response(),
+    match call!(state.doc_actor, DocMsg::DeletePage, id.clone()) {
+        Ok(Ok(())) => {
+            crate::handlers::unindex_async(state.clone(), id);
+            (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
+        }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
         Err(e) => internal(e).into_response(),
     }
