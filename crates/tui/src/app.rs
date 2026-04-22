@@ -602,12 +602,19 @@ pub async fn spawn_worker(
                 }
             }
             AppCmd::Ingest(raw) => {
+                let resolved = match resolve_at_prefix(&raw).await {
+                    Ok(text) => text,
+                    Err(e) => {
+                        let _ = ev_tx.send(AppEvent::Error(format!("@: {e}")));
+                        continue;
+                    }
+                };
                 #[derive(serde::Serialize)]
                 struct Req<'a> {
                     raw: &'a str,
                 }
                 let url = format!("{api}/api/ingest");
-                match http.post(&url).json(&Req { raw: &raw }).send().await {
+                match http.post(&url).json(&Req { raw: &resolved }).send().await {
                     Ok(r) => match r.json::<Value>().await {
                         Ok(v) => {
                             let _ = ev_tx.send(AppEvent::Ingested(v));
@@ -699,5 +706,97 @@ pub async fn spawn_worker(
                 }
             }
         }
+    }
+}
+
+// ─── @-prefix commands in ingest input ───────────────────────────────
+//
+// Currently supports a single form: `@<path> [extra text]` — read the file
+// and prepend its contents to the raw text sent to `/api/ingest`. More
+// @-commands (@url, @clipboard, …) can slot in here later without changing
+// callers, because the resolver only touches the string before it leaves
+// the worker.
+
+async fn resolve_at_prefix(input: &str) -> Result<String, String> {
+    let s = input.trim_start();
+    if !s.starts_with('@') {
+        return Ok(input.to_string());
+    }
+    let rest = &s[1..];
+    let (token, extra) = match rest.find(char::is_whitespace) {
+        Some(i) => (&rest[..i], rest[i..].trim()),
+        None => (rest, ""),
+    };
+    if token.is_empty() {
+        return Err("empty @ token — expected path".into());
+    }
+
+    // For now every @token is a file path. Future @commands would branch here.
+    let path = expand_tilde(token);
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+
+    if extra.is_empty() {
+        Ok(content)
+    } else {
+        Ok(format!("{content}\n\n---\n\n{extra}"))
+    }
+}
+
+fn expand_tilde(p: &str) -> std::path::PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn plain_text_passes_through() {
+        let out = resolve_at_prefix("hello world").await.unwrap();
+        assert_eq!(out, "hello world");
+    }
+
+    #[tokio::test]
+    async fn at_path_reads_file() {
+        let dir = std::env::temp_dir().join("cozby_at_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note.md");
+        std::fs::write(&file, "file body").unwrap();
+        let input = format!("@{}", file.display());
+        let out = resolve_at_prefix(&input).await.unwrap();
+        assert_eq!(out, "file body");
+    }
+
+    #[tokio::test]
+    async fn at_path_with_extra_text_appends() {
+        let dir = std::env::temp_dir().join("cozby_at_extra");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note.md");
+        std::fs::write(&file, "body").unwrap();
+        let input = format!("@{}  also tag: rust", file.display());
+        let out = resolve_at_prefix(&input).await.unwrap();
+        assert!(out.contains("body"));
+        assert!(out.contains("also tag: rust"));
+    }
+
+    #[tokio::test]
+    async fn missing_file_returns_error() {
+        let err = resolve_at_prefix("@/definitely/not/a/real/file.md")
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("read "));
+    }
+
+    #[tokio::test]
+    async fn empty_token_errors() {
+        let err = resolve_at_prefix("@").await.unwrap_err();
+        assert!(err.contains("empty"));
     }
 }

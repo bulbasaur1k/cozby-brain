@@ -226,9 +226,9 @@ fn render_inbox(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     let label = if app.mode == Mode::Ingest {
-        "ingest (Enter → send · Esc → cancel)"
+        "ingest (Enter → send · Esc → cancel · @/path для файла)"
     } else {
-        "ingest (i → edit)"
+        "ingest (i → edit · @/path для файла)"
     };
     let input = Paragraph::new(app.input.as_str()).block(if app.mode == Mode::Ingest {
         theme::block_focused(label)
@@ -258,7 +258,10 @@ fn welcome_message() -> String {
      reminder — с временем (\"через 30 мин…\")\n\
      question — поиск\n\
      \n\
-     В одном сообщении можно смешивать разные типы."
+     В одном сообщении можно смешивать разные типы.\n\
+     \n\
+     Файл: начни с @/путь/к/файлу (или @~/file.md) — TUI прочитает\n\
+     его и отправит содержимое. Можно дописать контекст после пути."
         .into()
 }
 
