@@ -37,6 +37,14 @@ cargo install --path crates/tui    # один раз — ставит cozby-tui 
 cozby-tui                          # в новом терминале
 ```
 
+Альтернативный Dockerfile (например, slim/debug-вариант):
+
+```bash
+./run-docker.sh -f Dockerfile.dev              # путь к Dockerfile
+./run-docker.sh -f my.Dockerfile -i my:tag     # +своё имя образа
+# либо в .env:  COZBY_DOCKERFILE=Dockerfile.dev
+```
+
 ## Что делает каждый скрипт
 
 | Скрипт | Сценарий | Что делает |

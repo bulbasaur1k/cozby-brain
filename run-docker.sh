@@ -2,11 +2,28 @@
 # run-docker.sh — второй сценарий: всё в Docker кроме TUI.
 #
 # Использование:
-#   ./run-docker.sh            — build + up профиль `full` (db + qdrant + minio + cozby-brain)
-#   ./run-docker.sh stop       — docker compose down (все контейнеры этого проекта)
-#   ./run-docker.sh logs       — хвост логов cozby-brain
-#   ./run-docker.sh status     — статус всех контейнеров
-#   ./run-docker.sh rebuild    — пересобрать образ cozby-brain и перезапустить
+#   ./run-docker.sh [команда] [-f|--dockerfile PATH] [-i|--image TAG]
+#
+# Команды:
+#   up | start       — build + up профиля `full` (db + qdrant + minio + cozby-brain)
+#   stop | down      — docker compose down (все контейнеры этого проекта)
+#   logs             — хвост логов cozby-brain
+#   status | ps      — статус всех контейнеров
+#   rebuild          — пересобрать образ cozby-brain (no-cache) и перезапустить
+#
+# Флаги:
+#   -f, --dockerfile PATH    путь к Dockerfile (по умолчанию ./Dockerfile)
+#                            экспортирует COZBY_DOCKERFILE для docker compose
+#   -i, --image TAG          имя/тег собираемого образа (по умолчанию cozby-brain:local)
+#                            экспортирует COZBY_IMAGE
+#
+# Те же переменные можно положить в .env — compose подхватит их сам.
+#
+# Примеры:
+#   ./run-docker.sh                              # дефолтный Dockerfile
+#   ./run-docker.sh -f Dockerfile.dev            # альтернативный dockerfile
+#   ./run-docker.sh rebuild -f Dockerfile.prod   # флаги можно после команды
+#   ./run-docker.sh -f dockerfiles/slim.Dockerfile -i cozby-brain:slim
 #
 # TUI остаётся на хосте: `cargo install --path crates/tui` → `cozby-tui`.
 
@@ -21,6 +38,48 @@ info()  { printf "${B}ℹ${N} %s\n" "$*"; }
 ok()    { printf "${G}✓${N} %s\n" "$*"; }
 warn()  { printf "${Y}⚠${N} %s\n" "$*"; }
 err()   { printf "${R}✗${N} %s\n" "$*" >&2; }
+
+# ─── parse flags + command ─────────────────────────────────────────────
+
+CMD=""
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -f|--dockerfile)
+            if [ -z "${2:-}" ]; then err "-f требует аргумент"; exit 1; fi
+            export COZBY_DOCKERFILE="$2"
+            shift 2
+            ;;
+        -i|--image)
+            if [ -z "${2:-}" ]; then err "-i требует аргумент"; exit 1; fi
+            export COZBY_IMAGE="$2"
+            shift 2
+            ;;
+        -h|--help|help)
+            grep '^#' "$0" | sed 's/^# \?//'
+            exit 0
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+CMD="${POSITIONAL[0]:-up}"
+
+# Sanity-check на Dockerfile, если переопределён — ранний, до любого docker-вызова.
+if [ -n "${COZBY_DOCKERFILE:-}" ]; then
+    if [ ! -f "$COZBY_DOCKERFILE" ]; then
+        err "Dockerfile не найден: $COZBY_DOCKERFILE"
+        exit 1
+    fi
+    info "Dockerfile: $COZBY_DOCKERFILE"
+fi
+if [ -n "${COZBY_IMAGE:-}" ]; then
+    info "Image: $COZBY_IMAGE"
+fi
+
+# ─── commands ──────────────────────────────────────────────────────────
 
 cmd_up() {
     if ! docker info >/dev/null 2>&1; then
@@ -89,17 +148,14 @@ cmd_rebuild() {
     ok "Перезапущено"
 }
 
-case "${1:-up}" in
+case "$CMD" in
     up|start|"")    cmd_up ;;
     stop|down)      cmd_stop ;;
     logs|log|tail)  cmd_logs ;;
     status|ps)      cmd_status ;;
     rebuild)        cmd_rebuild ;;
-    -h|--help|help)
-        grep '^#' "$0" | sed 's/^# \?//'
-        ;;
     *)
-        err "Неизвестная команда: $1"
+        err "Неизвестная команда: $CMD"
         err "Доступно: up | stop | logs | status | rebuild"
         exit 1
         ;;

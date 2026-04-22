@@ -77,8 +77,10 @@ services:
     profiles: ["full"]
     build:
       context: .
-      dockerfile: Dockerfile
-    image: cozby-brain:local
+      # Переопределяется через COZBY_DOCKERFILE (из .env или шелла)
+      # или флагом ./run-docker.sh -f <path>.
+      dockerfile: ${COZBY_DOCKERFILE:-Dockerfile}
+    image: ${COZBY_IMAGE:-cozby-brain:local}
     restart: unless-stopped
     depends_on:
       db:
