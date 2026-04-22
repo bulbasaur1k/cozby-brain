@@ -1,9 +1,14 @@
-# Локальная инфра для разработки:
-# - db + qdrant запускаются в Docker
-# - приложение (cozby-brain) запускается НА ХОСТЕ через ./run.sh на порту 8081
+# Два сценария:
 #
-# В корп-прод инфре БД и Qdrant — внешние managed-сервисы,
-# приложение подключается к ним через env-переменные DATABASE_URL / QDRANT_URL.
+# 1. Native dev: `docker compose up -d`  → только db + qdrant + minio.
+#    Приложение запускается на хосте через ./run.sh.
+#
+# 2. All-in-docker: `docker compose --profile full up -d --build`
+#    → к инфре добавляется контейнер cozby-brain (собирается из Dockerfile).
+#    Используй ./run-docker.sh.
+#
+# Сервис cozby-brain скрыт за profile `full`, чтобы сценарий 1 не собирал
+# образ приложения зря.
 services:
   db:
     image: postgres:16-alpine
@@ -66,6 +71,33 @@ services:
       mc mb --ignore-existing local/cozby-attachments &&
       echo 'bucket ready'
       "
+
+  # --- Scenario 2: app in docker ---------------------------------------
+  cozby-brain:
+    profiles: ["full"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cozby-brain:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    # .env поставляет LLM_*, EMBEDDING_MODEL и т.п. (ключи провайдера).
+    # Явный environment ниже перезатирает адреса инфры — внутри compose-сети
+    # сервисы резолвятся по именам сервисов, не localhost.
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://cozby:cozby@db:5432/cozby_brain
+      QDRANT_URL: http://qdrant:6334
+      S3_ENDPOINT: http://minio:9000
+      HTTP_ADDR: 0.0.0.0:8081
+    ports:
+      - "8081:8081"
 
 volumes:
   cozby_db:

@@ -6,30 +6,49 @@
 ## Требования
 
 - Docker + Docker Compose
-- Rust 1.85+ ([rustup.rs](https://rustup.rs))
+- Rust 1.85+ ([rustup.rs](https://rustup.rs)) — нужен только для TUI
 - Ключ к любому OpenAI-совместимому LLM (routerai / OpenRouter / Groq / Ollama)
 
-## Запуск
+## Запуск — два сценария
+
+У обоих общее: сначала положить ключ в `.env`.
 
 ```bash
-cp .env.example .env         # впиши LLM_API_KEY и, если надо, поменяй модель
-./release.sh                 # собирает release и ставит cozby / cozby-tui / cozby-brain в ~/.cargo/bin
-./run.sh                     # docker (db + qdrant + minio) + сервер на :8081
-cozby-tui                    # в новом терминале — основное UI
+cp .env.example .env         # впиши LLM_API_KEY
 ```
 
-Это всё. Отдельного `cargo build` / `cargo run` не надо.
+### Сценарий 1 — native dev (быстрая итерация кода)
+
+Сервер компилируется и работает на хосте, в Docker только инфра.
+
+```bash
+./release.sh                 # собирает release и ставит cozby / cozby-tui / cozby-brain в ~/.cargo/bin
+./run.sh                     # docker: db + qdrant + minio; сервер на :8081 (на хосте)
+cozby-tui                    # в новом терминале
+```
+
+### Сценарий 2 — всё в Docker, кроме TUI
+
+Сервер собирается в образ, БД/Qdrant/MinIO — рядом. Rust нужен только чтобы поставить TUI.
+
+```bash
+cargo install --path crates/tui    # один раз — ставит cozby-tui в ~/.cargo/bin
+./run-docker.sh                    # build + up всех контейнеров (сервер на :8081)
+cozby-tui                          # в новом терминале
+```
 
 ## Что делает каждый скрипт
 
-| Скрипт | Что делает |
-|---|---|
-| `./release.sh` | `cargo install --release` трёх бинарников в `~/.cargo/bin` + PATH для fish |
-| `./run.sh` | поднимает docker-сервисы, ждёт healthy, стартует `cozby-brain`, пишет лог в `logs/` |
-| `cozby-tui` | TUI-клиент: inbox/notes/todos/reminders/learning/docs |
+| Скрипт | Сценарий | Что делает |
+|---|---|---|
+| `./release.sh` | 1 | `cargo install --release` трёх бинарников в `~/.cargo/bin` + PATH для fish |
+| `./run.sh` | 1 | поднимает docker-инфру, стартует `cozby-brain` на хосте, лог → `logs/` |
+| `./run-docker.sh` | 2 | `docker compose --profile full up -d --build` — инфра + сервер в Docker |
+| `cozby-tui` | 1 и 2 | TUI-клиент, подключается к `http://localhost:8081` |
 
-Полезное у `run.sh`: `stop` · `status` · `logs` · `clean-logs`.
-Полезное у `release.sh`: `uninstall` · `--no-path`.
+Команды `run.sh`: `stop` · `status` · `logs` · `clean-logs`.
+Команды `run-docker.sh`: `stop` · `status` · `logs` · `rebuild`.
+Команды `release.sh`: `uninstall` · `--no-path`.
 
 ## .env (минимум)
 

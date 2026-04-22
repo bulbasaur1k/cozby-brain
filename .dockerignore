@@ -1,3 +1,9 @@
 target
 .env
 .git
+.claude
+logs
+*.log
+scripts
+README.md
+AGENT_PROMPT.md
