@@ -1,19 +1,75 @@
-# Self-hosted сценарий: инфра + cozby-brain в одном стеке.
+# Self-hosted сценарий: всё в docker, включая сервер cozby-brain.
 #
-#   docker compose up -d --build
+#   docker compose up -d --build     # или через ./start.sh
 #
-# Инфра (db + qdrant + minio) подтягивается из docker-compose.local.yml
-# через include: оба файла делят volume'ы и сервисы, так что можно
-# свободно переключаться между "сервер на хосте" (./run.sh) и
-# "сервер в контейнере" (./run-docker.sh / эту команду) — они шарят
-# те же контейнеры инфры (при COMPOSE_PROJECT_NAME=cozby-brain в .env
-# имена контейнеров совпадают, никаких port-конфликтов).
+# Для локальной разработки (сервер на хосте) используется отдельный
+# docker-compose.local.yml — там те же сервисы инфры, только без cozby-brain.
+# Оба файла намеренно независимы друг от друга — проще читать, проще менять.
 #
-# Все host-порты и адреса подключения параметризованы — см. .env.example.
-include:
-  - path: docker-compose.local.yml
-
+# COMPOSE_PROJECT_NAME=cozby-brain в .env делает имена контейнеров стабильными
+# между обоими сценариями, чтобы они шарили те же волюмы (db/qdrant/minio).
 services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cozby
+      POSTGRES_PASSWORD: cozby
+      POSTGRES_DB: cozby_brain
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - cozby_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cozby -d cozby_brain"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_REST_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/cozby-attachments &&
+      echo 'bucket ready'
+      "
+
   cozby-brain:
     build:
       context: .
@@ -27,12 +83,12 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-    # .env поставляет LLM_*, EMBEDDING_MODEL, RUST_LOG и т.п.
+    # .env → LLM_*, EMBEDDING_MODEL, RUST_LOG и т.п.
     env_file: .env
-    # Явный environment перекрывает одноимённые значения из env_file.
-    # В .env URL'ы указывают на localhost (для хоста), а внутри
-    # compose-сети адресация по именам сервисов. Если надо смотреть в
-    # managed-сервис — перекрой COZBY_INTERNAL_* в шелле или .env.
+    # Явный environment перекрывает одноимённые значения из env_file:
+    # в .env URL'ы указывают на localhost (для native сценария), а внутри
+    # compose-сети адресация идёт по именам сервисов. COZBY_INTERNAL_* можно
+    # переопределить в .env/шелле чтобы смотреть на внешние managed-сервисы.
     environment:
       DATABASE_URL: ${COZBY_INTERNAL_DB_URL:-postgres://cozby:cozby@db:5432/cozby_brain}
       QDRANT_URL: ${COZBY_INTERNAL_QDRANT_URL:-http://qdrant:6334}
@@ -40,3 +96,8 @@ services:
       HTTP_ADDR: 0.0.0.0:8081
     ports:
       - "${HTTP_PORT:-8081}:8081"
+
+volumes:
+  cozby_db:
+  qdrant_data:
+  minio_data:

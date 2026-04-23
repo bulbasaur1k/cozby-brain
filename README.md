@@ -29,43 +29,43 @@ cozby-tui                    # в новом терминале
 
 ### Сценарий 2 — self-hosted (всё в docker, кроме TUI)
 
-Сервер собирается в образ, инфра рядом, один `docker compose up` поднимает всё.
+Один скрипт-ярлык собирает TUI (через `release.sh`) и поднимает весь стек в docker:
 
 ```bash
-cargo install --path crates/tui    # один раз — ставит cozby-tui в ~/.cargo/bin
-./run-docker.sh                    # == docker compose up -d --build (через обёртку с health-check)
-# или напрямую:
+./start.sh                   # == ./release.sh + docker compose up -d --build
+cozby-tui                    # в новом терминале
+```
+
+Если не нужна TUI на хосте — можно вызывать compose напрямую:
+
+```bash
 docker compose up -d --build
-
-cozby-tui                          # в новом терминале
 ```
 
-Альтернативный Dockerfile / тег образа:
+### Как устроены compose-файлы
 
-```bash
-./run-docker.sh -f Dockerfile.dev              # путь к Dockerfile
-./run-docker.sh -f my.Dockerfile -i my:tag     # +своё имя образа
-# либо в .env:  COZBY_DOCKERFILE=Dockerfile.dev  COZBY_IMAGE=cozby-brain:dev
-```
-
-### Как файлы сосуществуют
-
-- `docker-compose.local.yml` — только инфра (db + qdrant + minio). Используется в сценарии 1.
-- `docker-compose.yml` — инфра через `include:` + сервис `cozby-brain`. Используется в сценарии 2.
-- Контейнеры инфры одни и те же в обоих сценариях (при `COMPOSE_PROJECT_NAME=cozby-brain` из `.env`) — переключаться между сценариями можно без пересоздания БД.
+- `docker-compose.local.yml` — только инфра (`db + qdrant + minio + minio-init`). Используется `./run.sh`.
+- `docker-compose.yml` — те же сервисы + `cozby-brain`. Используется `./start.sh` / `docker compose up`.
+- Файлы стоят независимо друг от друга, инфра дублируется осознанно — так проще читать и менять без сюрпризов `include:`.
+- При `COMPOSE_PROJECT_NAME=cozby-brain` из `.env` имена контейнеров и волюмы совпадают между сценариями — переключаться можно без потери БД.
 
 ## Что делает каждый скрипт
 
 | Скрипт | Сценарий | Что делает |
 |---|---|---|
-| `./release.sh` | 1 | `cargo install --release` трёх бинарников в `~/.cargo/bin` + PATH для fish |
+| `./release.sh` | 1 и 2 | `cargo install --release` трёх бинарников в `~/.cargo/bin` + PATH для fish |
 | `./run.sh` | 1 | `docker compose -f docker-compose.local.yml up -d` + сборка и запуск сервера на хосте |
-| `./run-docker.sh` | 2 | `docker compose up -d --build` — инфра + сервер в Docker, ждёт `/health` |
+| `./start.sh` | 2 | `./release.sh && docker compose up -d --build` — минимальный ярлык, без логики |
 | `cozby-tui` | 1 и 2 | TUI-клиент, подключается к `http://localhost:$HTTP_PORT` |
 
 Команды `run.sh`: `stop` · `status` · `logs` · `clean-logs`.
-Команды `run-docker.sh`: `stop` · `status` · `logs` · `rebuild` · `-f PATH` · `-i TAG`.
 Команды `release.sh`: `uninstall` · `--no-path`.
+
+Альтернативный Dockerfile для сценария 2 — через `.env`:
+```env
+COZBY_DOCKERFILE=Dockerfile.dev
+COZBY_IMAGE=cozby-brain:dev
+```
 
 ## Настройка через .env
 
