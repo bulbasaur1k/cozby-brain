@@ -76,6 +76,12 @@ cmd_run() {
         exit 1
     fi
 
+    # Явный down перед up: если предыдущий запуск оставил контейнеры от
+    # другого compose-файла (или yaml сменился), docker не успевает отпустить
+    # host-порты при recreate → "port already allocated". С down-up всё чисто.
+    info "Сброс старой инфры (если была)..."
+    $COMPOSE down --remove-orphans >/dev/null 2>&1 || true
+
     info "Поднимаю инфру (db + qdrant + minio)..."
     $COMPOSE up -d
 

@@ -20,4 +20,8 @@ if [ "${1:-}" = "-f" ] || [ "${1:-}" = "--dockerfile" ]; then
 fi
 
 ./release.sh
+# down перед up делает скрипт идемпотентным: Docker успевает корректно
+# отпустить host-порты между рестартами. Без него recreate-при-изменении-
+# compose.yml на macOS периодически ловит "port already allocated".
+docker compose down --remove-orphans
 docker compose up -d --build
