@@ -207,6 +207,10 @@ pub struct App {
     pub todo_filter: TodoFilter,
     pub confirm: Option<PendingConfirm>,
 
+    /// @path-автодополнение: подсказки по текущему токену и выбранный индекс.
+    pub completions: Vec<Completion>,
+    pub completion_index: usize,
+
     pub cmd_tx: UnboundedSender<AppCmd>,
 }
 
@@ -233,10 +237,149 @@ impl App {
             doc_pages: HashMap::new(),
             todo_filter: TodoFilter::LastDays(5),
             confirm: None,
+            completions: Vec::new(),
+            completion_index: 0,
             cmd_tx,
         }
     }
 
+    // ─── @path completion ────────────────────────────────────────────
+
+    /// Перечитывает список файлов/каталогов по текущему @-токену в input.
+    /// Вызывается после любой правки input в ingest-режиме.
+    pub fn recompute_completions(&mut self) {
+        self.completions = compute_completions(&self.input);
+        // Держим индекс в валидном диапазоне.
+        if self.completion_index >= self.completions.len() {
+            self.completion_index = 0;
+        }
+    }
+
+    pub fn completion_next(&mut self) {
+        if self.completions.is_empty() {
+            return;
+        }
+        self.completion_index = (self.completion_index + 1) % self.completions.len();
+    }
+
+    pub fn completion_prev(&mut self) {
+        if self.completions.is_empty() {
+            return;
+        }
+        self.completion_index = if self.completion_index == 0 {
+            self.completions.len() - 1
+        } else {
+            self.completion_index - 1
+        };
+    }
+
+    /// Заменяет текущий @-токен в input на выбранную подсказку.
+    /// Возвращает true если что-то приняли.
+    pub fn accept_completion(&mut self) -> bool {
+        let Some(comp) = self.completions.get(self.completion_index).cloned() else {
+            return false;
+        };
+        if let Some((start, _)) = at_token_bounds(&self.input) {
+            self.input.truncate(start);
+            self.input.push_str(&comp.insert);
+        } else {
+            self.input.push_str(&comp.insert);
+        }
+        // Если выбрали каталог — держим попап открытым и показываем его
+        // содержимое, чтобы можно было продолжить углубляться.
+        if comp.is_dir {
+            self.recompute_completions();
+        } else {
+            self.completions.clear();
+        }
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Completion {
+    /// Что подставить в input (вместе с `@` в начале).
+    pub insert: String,
+    /// Как отобразить в попапе (имя файла/каталога, у каталогов — со слешом).
+    pub display: String,
+    pub is_dir: bool,
+}
+
+/// Возвращает `(byte_offset_начала, @-токен)` если последнее «слово» в input
+/// начинается с `@`. Иначе None.
+pub fn at_token_bounds(input: &str) -> Option<(usize, &str)> {
+    // Найти байтовое начало последнего whitespace-разделённого слова.
+    let start = input
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let word = &input[start..];
+    if word.starts_with('@') {
+        Some((start, word))
+    } else {
+        None
+    }
+}
+
+/// По текущему @-токену в input строит список файлов/каталогов.
+pub fn compute_completions(input: &str) -> Vec<Completion> {
+    let Some((_, token)) = at_token_bounds(input) else {
+        return Vec::new();
+    };
+    // token начинается с '@'. Убираем префикс — получаем "сырую" часть пути.
+    let raw = &token[1..];
+    let (dir_raw, prefix) = split_dir_prefix(raw);
+    let dir_abs = if dir_raw.is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        expand_tilde(&dir_raw)
+    };
+
+    let entries = match std::fs::read_dir(&dir_abs) {
+        Ok(it) => it,
+        Err(_) => return Vec::new(),
+    };
+
+    let prefix_lc = prefix.to_lowercase();
+    let mut out: Vec<Completion> = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        // Скрываем дотфайлы если пользователь сам не начал с точки.
+        if name.starts_with('.') && !prefix.starts_with('.') {
+            continue;
+        }
+        if !name.to_lowercase().starts_with(&prefix_lc) {
+            continue;
+        }
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let suffix = if is_dir { "/" } else { "" };
+        out.push(Completion {
+            insert: format!("@{dir_raw}{name}{suffix}"),
+            display: format!("{name}{suffix}"),
+            is_dir,
+        });
+    }
+    // Каталоги вверх, затем алфавит.
+    out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.display.cmp(&b.display)));
+    out.truncate(20);
+    out
+}
+
+/// Разбирает `<dir>/<prefix>` — если нет `/`, dir пустой, prefix = весь token.
+fn split_dir_prefix(token: &str) -> (String, String) {
+    // Особый случай — голый `~`: показываем содержимое $HOME.
+    if token == "~" {
+        return ("~/".into(), String::new());
+    }
+    match token.rfind('/') {
+        Some(i) => (token[..=i].to_string(), token[i + 1..].to_string()),
+        None => (String::new(), token.to_string()),
+    }
+}
+
+impl App {
     pub fn switch_tab(&mut self, tab: Tab) {
         if self.tab == tab && !self.items.is_empty() {
             return;
@@ -798,5 +941,76 @@ mod tests {
     async fn empty_token_errors() {
         let err = resolve_at_prefix("@").await.unwrap_err();
         assert!(err.contains("empty"));
+    }
+
+    // ─── @path autocompletion ──────────────────────────────────────
+
+    #[test]
+    fn at_token_bounds_basic() {
+        assert_eq!(at_token_bounds("@foo"), Some((0, "@foo")));
+        assert_eq!(at_token_bounds("hello @bar"), Some((6, "@bar")));
+        assert_eq!(at_token_bounds("hello world"), None);
+        assert_eq!(at_token_bounds("@"), Some((0, "@")));
+        // Перенос строки тоже считается whitespace
+        assert_eq!(at_token_bounds("line1\n@path"), Some((6, "@path")));
+        // @ внутри слова — не токен (нет whitespace перед)
+        assert_eq!(at_token_bounds("foo@bar"), None);
+    }
+
+    #[test]
+    fn compute_completions_empty_input_no_results() {
+        assert!(compute_completions("").is_empty());
+        assert!(compute_completions("plain text").is_empty());
+    }
+
+    // Параллельно гоняемые тесты не трогают `std::env::current_dir()` —
+    // вместо этого передаём в @-токене абсолютный путь до песочницы.
+    #[test]
+    fn compute_completions_lists_dir_after_at() {
+        let sandbox = std::env::temp_dir().join("cozby_at_complete");
+        let _ = std::fs::remove_dir_all(&sandbox);
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(sandbox.join("readme.md"), "").unwrap();
+        std::fs::write(sandbox.join("notes.md"), "").unwrap();
+        std::fs::create_dir_all(sandbox.join("src")).unwrap();
+
+        let base = sandbox.display().to_string();
+        let out = compute_completions(&format!("@{base}/"));
+        let names: Vec<String> = out.iter().map(|c| c.display.clone()).collect();
+        assert_eq!(names.first().map(|s| s.as_str()), Some("src/"));
+        assert!(names.contains(&"readme.md".into()));
+        assert!(names.contains(&"notes.md".into()));
+        assert!(out.iter().find(|c| c.display == "src/").unwrap().is_dir);
+
+        let only_r = compute_completions(&format!("@{base}/r"));
+        assert_eq!(
+            only_r.iter().map(|c| c.display.as_str()).collect::<Vec<_>>(),
+            vec!["readme.md"]
+        );
+        assert_eq!(only_r[0].insert, format!("@{base}/readme.md"));
+
+        let dir_comp = compute_completions(&format!("@{base}/s"));
+        assert_eq!(dir_comp[0].display, "src/");
+        assert_eq!(dir_comp[0].insert, format!("@{base}/src/"));
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn compute_completions_dotfiles_hidden_by_default() {
+        let sandbox = std::env::temp_dir().join("cozby_at_dot");
+        let _ = std::fs::remove_dir_all(&sandbox);
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(sandbox.join(".env"), "").unwrap();
+        std::fs::write(sandbox.join("visible.txt"), "").unwrap();
+
+        let base = sandbox.display().to_string();
+        let plain = compute_completions(&format!("@{base}/"));
+        assert!(plain.iter().all(|c| !c.display.starts_with('.')));
+
+        let dotted = compute_completions(&format!("@{base}/."));
+        assert!(dotted.iter().any(|c| c.display == ".env"));
+
+        let _ = std::fs::remove_dir_all(&sandbox);
     }
 }

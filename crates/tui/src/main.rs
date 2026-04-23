@@ -317,34 +317,61 @@ fn handle_normal(app: &mut App, code: KeyCode, pending_tab_key: &mut bool) -> bo
 }
 
 fn handle_ingest(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
+    let has_completions = !app.completions.is_empty();
+
     // Перенос строки: Ctrl+Enter / Alt+Enter. Разные терминалы по-разному
     // передают Ctrl+Enter — оба комбо покрывают ghostty/iTerm/kitty/wezterm.
-    // Чистый Enter отправляет сообщение.
     let is_newline = matches!(code, KeyCode::Enter)
         && (mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT));
     if is_newline {
         app.input.push('\n');
+        app.recompute_completions();
         return true;
     }
 
     match code {
+        // Управление попапом автодополнения — активно только пока он открыт.
+        KeyCode::Up if has_completions => app.completion_prev(),
+        KeyCode::Down if has_completions => app.completion_next(),
+        KeyCode::Tab if has_completions => {
+            app.accept_completion();
+        }
+        // Enter при открытом попапе — принять подсказку, а не отправить.
+        KeyCode::Enter if has_completions => {
+            app.accept_completion();
+        }
+        // Esc при открытом попапе — закрыть его, ingest-режим не выходим.
+        KeyCode::Esc if has_completions => {
+            app.completions.clear();
+            app.completion_index = 0;
+        }
+
         KeyCode::Esc => {
             app.mode = Mode::Normal;
             app.input.clear();
+            app.completions.clear();
         }
         KeyCode::Enter => {
             let text = std::mem::take(&mut app.input).trim().to_string();
             app.mode = Mode::Normal;
+            app.completions.clear();
             if !text.is_empty() {
                 app.loading = true;
                 app.status = "LLM обрабатывает…".into();
                 let _ = app.cmd_tx.send(AppCmd::Ingest(text));
             }
         }
-        KeyCode::Tab => app.input.push('\t'),
-        KeyCode::Char(c) => app.input.push(c),
+        KeyCode::Tab => {
+            app.input.push('\t');
+            app.recompute_completions();
+        }
+        KeyCode::Char(c) => {
+            app.input.push(c);
+            app.recompute_completions();
+        }
         KeyCode::Backspace => {
             app.input.pop();
+            app.recompute_completions();
         }
         _ => {}
     }

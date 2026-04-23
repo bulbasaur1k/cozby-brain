@@ -254,7 +254,7 @@ fn render_inbox(f: &mut Frame, app: &App, area: Rect) {
     let preview_text = if is_ingesting {
         // Маленькая подсказка под полем ввода — как отправить/отменить.
         "Enter — отправить   ·   Esc — отменить\n\
-         Ctrl+Enter / Alt+Enter — перенос строки · @/path/to/file — прочитать файл"
+         Ctrl+Enter / Alt+Enter — перенос строки · @/path — подсказки по файлам (Tab принять, ↑↓ выбрать)"
             .to_string()
     } else if let Some(v) = &app.last_ingest {
         format_ingest_result(v)
@@ -266,6 +266,61 @@ fn render_inbox(f: &mut Frame, app: &App, area: Rect) {
         .block(theme::block(if is_ingesting { "hint" } else { "preview" }))
         .style(theme::text());
     f.render_widget(preview, rows[1]);
+
+    // Popup с файлами — поверх input'а и hint'а, если есть что подсказать.
+    if is_ingesting && !app.completions.is_empty() {
+        render_completions_popup(f, app, rows[0]);
+    }
+}
+
+/// Всплывающая панель автодополнения @path. Прибита к нижней границе
+/// input-области, ширина ~60 колонок.
+fn render_completions_popup(f: &mut Frame, app: &App, input_area: Rect) {
+    let entries = app.completions.len() as u16;
+    let max_rows = 10u16.min(entries);
+    // +2 на рамку.
+    let h = (max_rows + 2).min(input_area.height);
+    let w = 60u16.min(input_area.width);
+    if h < 3 || w < 10 {
+        return;
+    }
+    let x = input_area.x;
+    let y = input_area.y + input_area.height.saturating_sub(h);
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+
+    // Сначала очищаем область — иначе увидим текст под попапом.
+    f.render_widget(Clear, rect);
+
+    // Скролл списка: удерживаем выбранный в пределах видимой области.
+    let start = app
+        .completion_index
+        .saturating_sub(max_rows.saturating_sub(1) as usize);
+
+    let items: Vec<ListItem> = app
+        .completions
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(max_rows as usize)
+        .map(|(i, c)| {
+            let style = if i == app.completion_index {
+                theme::accent().add_modifier(Modifier::REVERSED)
+            } else if c.is_dir {
+                theme::accent()
+            } else {
+                theme::text()
+            };
+            ListItem::new(Line::from(Span::styled(c.display.clone(), style)))
+        })
+        .collect();
+
+    let list = List::new(items).block(theme::block_focused("файлы (Tab принять · ↑↓ выбор · Esc закрыть)"));
+    f.render_widget(list, rect);
 }
 
 /// Поле ингеста: многострочный ввод с визуальным переносом, вертикальным
