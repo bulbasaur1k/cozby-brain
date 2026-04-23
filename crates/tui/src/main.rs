@@ -191,7 +191,7 @@ fn handle_key(
 
     match app.mode {
         Mode::Normal => handle_normal(app, code, pending_tab_key),
-        Mode::Ingest => handle_ingest(app, code),
+        Mode::Ingest => handle_ingest(app, code, mods),
         Mode::Search => handle_search(app, code),
         Mode::Command => handle_command(app, code),
         Mode::Confirm => handle_confirm(app, code),
@@ -316,21 +316,35 @@ fn handle_normal(app: &mut App, code: KeyCode, pending_tab_key: &mut bool) -> bo
     true
 }
 
-fn handle_ingest(app: &mut App, code: KeyCode) -> bool {
+fn handle_ingest(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
+    // Отправка: Ctrl+Enter / Alt+Enter / Ctrl+D / Ctrl+S.
+    // Разные терминалы по-разному передают Ctrl+Enter — поэтому несколько
+    // комбо. Enter без модификаторов вставляет перенос строки.
+    let is_send = match code {
+        KeyCode::Enter if mods.contains(KeyModifiers::CONTROL) => true,
+        KeyCode::Enter if mods.contains(KeyModifiers::ALT) => true,
+        KeyCode::Char('d') if mods.contains(KeyModifiers::CONTROL) => true,
+        KeyCode::Char('s') if mods.contains(KeyModifiers::CONTROL) => true,
+        _ => false,
+    };
+    if is_send {
+        let text = std::mem::take(&mut app.input).trim().to_string();
+        app.mode = Mode::Normal;
+        if !text.is_empty() {
+            app.loading = true;
+            app.status = "LLM обрабатывает…".into();
+            let _ = app.cmd_tx.send(AppCmd::Ingest(text));
+        }
+        return true;
+    }
+
     match code {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
             app.input.clear();
         }
-        KeyCode::Enter => {
-            let text = std::mem::take(&mut app.input).trim().to_string();
-            app.mode = Mode::Normal;
-            if !text.is_empty() {
-                app.loading = true;
-                app.status = "LLM обрабатывает…".into();
-                let _ = app.cmd_tx.send(AppCmd::Ingest(text));
-            }
-        }
+        KeyCode::Enter => app.input.push('\n'),
+        KeyCode::Tab => app.input.push('\t'),
         KeyCode::Char(c) => app.input.push(c),
         KeyCode::Backspace => {
             app.input.pop();

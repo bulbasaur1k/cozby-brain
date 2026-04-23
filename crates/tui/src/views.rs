@@ -63,18 +63,30 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 // ─── body = sidebar + list + detail ─────────────────────────────────
 
 fn render_body(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(18),
-            Constraint::Percentage(50),
-            Constraint::Min(40),
-        ])
-        .split(area);
+    // В ingest-режиме на Inbox cheatsheet справа не нужен — даём всё место
+    // под ввод. В любом другом случае сохраняем 3-колоночную раскладку.
+    let full_width_ingest = app.tab == Tab::Inbox && app.mode == Mode::Ingest;
 
-    render_sidebar(f, app, chunks[0]);
-    render_main(f, app, chunks[1]);
-    render_detail(f, app, chunks[2]);
+    if full_width_ingest {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(18), Constraint::Min(40)])
+            .split(area);
+        render_sidebar(f, app, chunks[0]);
+        render_main(f, app, chunks[1]);
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(18),
+                Constraint::Percentage(50),
+                Constraint::Min(40),
+            ])
+            .split(area);
+        render_sidebar(f, app, chunks[0]);
+        render_main(f, app, chunks[1]);
+        render_detail(f, app, chunks[2]);
+    }
 }
 
 fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
@@ -220,33 +232,106 @@ fn render_docs_tree(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_inbox(f: &mut Frame, app: &App, area: Rect) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)])
-        .split(area);
+    let is_ingesting = app.mode == Mode::Ingest;
 
-    let label = if app.mode == Mode::Ingest {
-        "ingest (Enter → send · Esc → cancel · @/path для файла)"
+    // В режиме ввода отдаём input почти весь экран — длинные тексты должны
+    // помещаться без того чтобы каретка уезжала за правый край. В obычном
+    // режиме оставляем старые 3 строки + preview.
+    let rows = if is_ingesting {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(5), Constraint::Length(3)])
+            .split(area)
     } else {
-        "ingest (i → edit · @/path для файла)"
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .split(area)
     };
-    let input = Paragraph::new(app.input.as_str()).block(if app.mode == Mode::Ingest {
-        theme::block_focused(label)
-    } else {
-        theme::block(label)
-    });
-    f.render_widget(input, rows[0]);
 
-    let preview_text = if let Some(v) = &app.last_ingest {
+    render_ingest_input(f, app, rows[0], is_ingesting);
+
+    let preview_text = if is_ingesting {
+        // Маленькая подсказка под полем ввода — как отправить/отменить.
+        "Ctrl+Enter / Alt+Enter / Ctrl+D — отправить   ·   Esc — отменить\n\
+         Enter вставляет перенос строки · @/path/to/file — прочитать файл"
+            .to_string()
+    } else if let Some(v) = &app.last_ingest {
         format_ingest_result(v)
     } else {
         welcome_message()
     };
     let preview = Paragraph::new(preview_text)
         .wrap(Wrap { trim: false })
-        .block(theme::block("preview"))
+        .block(theme::block(if is_ingesting { "hint" } else { "preview" }))
         .style(theme::text());
     f.render_widget(preview, rows[1]);
+}
+
+/// Поле ингеста: многострочный ввод с визуальным переносом, вертикальным
+/// скроллом (чтобы каретка всегда была видна) и миганием курсора в терминале.
+fn render_ingest_input(f: &mut Frame, app: &App, area: Rect, is_ingesting: bool) {
+    let label = if is_ingesting {
+        "ingest (Ctrl+Enter → send · Esc → cancel · @/path для файла)"
+    } else {
+        "ingest (i → edit · @/path для файла)"
+    };
+    let block = if is_ingesting {
+        theme::block_focused(label)
+    } else {
+        theme::block(label)
+    };
+
+    // Inner rect (внутри рамки) нужен чтобы вычислить ширину переноса и
+    // позицию курсора в координатах терминала.
+    let inner = block.inner(area);
+    let inner_w = inner.width as usize;
+    let inner_h = inner.height.max(1) as usize;
+
+    let (total_rows, cur_row, cur_col) = wrap_cursor_pos(&app.input, inner_w);
+    // Скролл — минимальный такой, чтобы курсор (или последняя строка) были
+    // в поле зрения.
+    let scroll = cur_row
+        .saturating_sub(inner_h.saturating_sub(1))
+        .max(total_rows.saturating_sub(inner_h));
+
+    let para = Paragraph::new(app.input.as_str())
+        .wrap(Wrap { trim: false })
+        .scroll((scroll as u16, 0))
+        .block(block);
+    f.render_widget(para, area);
+
+    if is_ingesting && inner_w > 0 && inner.height > 0 {
+        let visible_row = cur_row.saturating_sub(scroll);
+        let cx = inner.x + (cur_col.min(inner_w.saturating_sub(1))) as u16;
+        let cy = inner.y + (visible_row.min(inner_h.saturating_sub(1))) as u16;
+        f.set_cursor_position((cx, cy));
+    }
+}
+
+/// Простая симуляция переноса для фиксированной ширины: возвращает
+/// `(всего_строк, строка_курсора, колонка_курсора)` для каретки в конце
+/// текста. Считает `char` за 1 колонку — для кириллицы/латиницы верно,
+/// для широких символов (CJK/emoji) — приближение.
+fn wrap_cursor_pos(text: &str, width: usize) -> (usize, usize, usize) {
+    if width == 0 {
+        return (1, 0, 0);
+    }
+    let mut row = 0usize;
+    let mut col = 0usize;
+    for c in text.chars() {
+        if c == '\n' {
+            row += 1;
+            col = 0;
+            continue;
+        }
+        if col >= width {
+            row += 1;
+            col = 0;
+        }
+        col += 1;
+    }
+    (row + 1, row, col)
 }
 
 fn welcome_message() -> String {
