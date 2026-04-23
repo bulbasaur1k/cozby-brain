@@ -78,6 +78,8 @@ DATABASE_URL=postgres://cozby:cozby@localhost:5433/cozby_brain  # подгоня
 
 Если сервер в docker должен ходить в **внешний** managed-postgres/qdrant/s3 — переопредели `COZBY_INTERNAL_DB_URL` / `COZBY_INTERNAL_QDRANT_URL` / `COZBY_INTERNAL_S3_ENDPOINT` в `.env`.
 
+> **MinIO console (порт 9001) по умолчанию не пробрасывается** — 9001 часто занят у людей чем-то другим (Portainer, Prometheus и т.п.). Если нужна web-консоль MinIO, раскомментируй строку `- "${MINIO_CONSOLE_PORT:-9001}:9001"` в `docker-compose.yml` (и/или `.local.yml`) и поменяй `MINIO_CONSOLE_PORT` в `.env` если 9001 занят. Приложению консоль не нужна.
+
 Полный список переменных с комментариями — в [.env.example](.env.example).
 
 Избегай reasoning-моделей (`*-thinking`, `glm-4.7-flash`) — бери instruct.

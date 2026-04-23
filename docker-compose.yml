@@ -48,8 +48,13 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
+      # S3 API — нужен приложению
       - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      # Console UI — по умолчанию не пробрасываем: порт 9001 часто занят
+      # другими инструментами (Portainer и т.п.). Чтобы включить — впиши в
+      # .env `MINIO_CONSOLE_PORT=9001` (или свой свободный порт),
+      # раскомментируй строку ниже и сделай ./start.sh или ./run.sh.
+      # - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
     healthcheck:
