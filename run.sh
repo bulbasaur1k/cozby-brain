@@ -1,52 +1,51 @@
 #!/usr/bin/env bash
-# run.sh — запуск cozby-brain локально (db + qdrant в Docker, app на хосте)
+# run.sh — локальный сценарий: инфра в docker, сервер на хосте.
 #
-# Использование:
-#   ./run.sh              — запустить всё (db + qdrant + app на :8081)
-#   ./run.sh stop         — остановить db + qdrant
-#   ./run.sh logs         — хвост сегодняшнего лога
-#   ./run.sh status       — статус всех сервисов
-#   ./run.sh clean-logs   — удалить все старые логи
+#   ./run.sh              поднять db + qdrant + minio и запустить cozby-brain
+#   ./run.sh stop         остановить docker-инфру
+#   ./run.sh logs         tail сегодняшнего лога приложения
+#   ./run.sh status       статус docker-сервисов + health приложения
+#   ./run.sh clean-logs   удалить старые логи
 #
-# Логи: logs/cozby-brain-YYYYMMDD.log (автоматическая ротация по дням, retention 7 дней).
+# Логи: logs/cozby-brain-YYYYMMDD.log, retention 7 дней.
+# Docker-инфра живёт в docker-compose.local.yml (без самого приложения).
 
 set -euo pipefail
-
 cd "$(dirname "$0")"
+
+COMPOSE_FILE="docker-compose.local.yml"
+COMPOSE="docker compose -f $COMPOSE_FILE"
 
 LOG_DIR="logs"
 LOG_FILE="$LOG_DIR/cozby-brain-$(date +%Y%m%d).log"
 KEEP_DAYS=7
-HEALTH_URL="http://localhost:8081/health"
+HEALTH_URL="http://localhost:${HTTP_PORT:-8081}/health"
 
-# ANSI цвета
-G="\033[0;32m"  # green
-Y="\033[0;33m"  # yellow
-R="\033[0;31m"  # red
-B="\033[0;34m"  # blue
-N="\033[0m"     # reset
-
+G="\033[0;32m"; Y="\033[0;33m"; R="\033[0;31m"; B="\033[0;34m"; N="\033[0m"
 info()  { printf "${B}ℹ${N} %s\n" "$*"; }
 ok()    { printf "${G}✓${N} %s\n" "$*"; }
 warn()  { printf "${Y}⚠${N} %s\n" "$*"; }
 err()   { printf "${R}✗${N} %s\n" "$*" >&2; }
 
-# ─── команды ──────────────────────────────────────────────────────────
+svc_health() {
+    # $1 — service name. Возвращает healthy/starting/unhealthy/missing
+    $COMPOSE ps "$1" --format '{{.Health}}' 2>/dev/null | head -1 || echo missing
+}
 
 cmd_stop() {
-    info "Останавливаю db + qdrant..."
-    docker compose down
+    info "Останавливаю docker-инфру..."
+    $COMPOSE down
     ok "Остановлено"
 }
 
 cmd_status() {
     printf "\n"
     info "Docker-сервисы:"
-    docker compose ps
+    $COMPOSE ps
     printf "\n"
-    info "Приложение (порт 8081):"
+    info "Приложение ($HEALTH_URL):"
     if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
-        ok "cozby-brain работает: $HEALTH_URL"
+        ok "cozby-brain работает"
     else
         warn "cozby-brain не отвечает"
     fi
@@ -70,61 +69,50 @@ cmd_clean_logs() {
 
 cmd_run() {
     mkdir -p "$LOG_DIR"
-
-    # ротация — удаляем логи старше KEEP_DAYS
     find "$LOG_DIR" -name 'cozby-brain-*.log' -mtime +$KEEP_DAYS -delete 2>/dev/null || true
 
-    # проверяем Docker
     if ! docker info >/dev/null 2>&1; then
         err "Docker не запущен. Запусти Docker Desktop и повтори."
         exit 1
     fi
 
-    # поднимаем db + qdrant
-    info "Поднимаю db + qdrant в Docker..."
-    docker compose up -d db qdrant
+    info "Поднимаю инфру (db + qdrant + minio)..."
+    $COMPOSE up -d
 
-    # ждём healthy (макс 30 сек)
-    info "Жду готовности сервисов..."
+    info "Жду healthy..."
     for i in $(seq 1 30); do
-        db_state=$(docker inspect --format '{{.State.Health.Status}}' cozby-brain-db-1 2>/dev/null || echo "starting")
-        qd_state=$(docker inspect --format '{{.State.Health.Status}}' cozby-brain-qdrant-1 2>/dev/null || echo "starting")
-        if [ "$db_state" = "healthy" ] && [ "$qd_state" = "healthy" ]; then
-            ok "db + qdrant готовы"
+        db=$(svc_health db)
+        qd=$(svc_health qdrant)
+        if [ "$db" = "healthy" ] && [ "$qd" = "healthy" ]; then
+            ok "Инфра готова"
             break
         fi
         if [ $i -eq 30 ]; then
-            err "Таймаут ожидания (db=$db_state, qdrant=$qd_state)"
+            err "Таймаут (db=$db qdrant=$qd)"
             exit 1
         fi
         sleep 1
     done
 
-    # проверяем что порт 8081 свободен
-    if lsof -ti :8081 >/dev/null 2>&1; then
-        err "Порт 8081 уже занят другим процессом."
-        err "Останови его или запусти: lsof -ti :8081 | xargs kill"
+    local port="${HTTP_PORT:-8081}"
+    if lsof -ti :"$port" >/dev/null 2>&1; then
+        err "Порт $port уже занят. Убей процесс: lsof -ti :$port | xargs kill"
         exit 1
     fi
 
-    # билдим release (кеш + fast)
     info "Сборка cozby-brain (release)..."
     if ! cargo build --release -p cozby-brain 2>&1 | grep -E "error|warning:" | head -10; then
-        true # нет ошибок/варнингов — ок
+        true
     fi
 
     printf "\n"
-    ok "Запуск cozby-brain на http://localhost:8081"
+    ok "Запуск cozby-brain на http://localhost:$port"
     info "Логи: $LOG_FILE  (просмотр: ./run.sh logs)"
-    info "Ctrl+C для остановки приложения (Docker-сервисы останутся работать)"
+    info "Ctrl+C для остановки приложения (docker-сервисы останутся работать)"
     printf "%s\n" "──────────────────────────────────────────────────────────────"
 
-    # Запускаем приложение, stdout+stderr → терминал + лог-файл
-    # exec заменяет шелл, так что Ctrl+C работает чисто
     exec ./target/release/cozby-brain 2>&1 | tee -a "$LOG_FILE"
 }
-
-# ─── main ─────────────────────────────────────────────────────────────
 
 case "${1:-run}" in
     run|up|start|"") cmd_run ;;

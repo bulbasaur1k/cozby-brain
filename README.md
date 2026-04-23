@@ -17,67 +17,68 @@
 cp .env.example .env         # впиши LLM_API_KEY
 ```
 
-### Сценарий 1 — native dev (быстрая итерация кода)
+### Сценарий 1 — local dev (сервер на хосте)
 
-Сервер компилируется и работает на хосте, в Docker только инфра.
+Инфра в docker, приложение компилируется и работает нативно. Быстрая итерация кода.
 
 ```bash
 ./release.sh                 # собирает release и ставит cozby / cozby-tui / cozby-brain в ~/.cargo/bin
-./run.sh                     # docker: db + qdrant + minio; сервер на :8081 (на хосте)
+./run.sh                     # docker-compose.local.yml: db + qdrant + minio; сервер на $HTTP_PORT (по дефолту 8081)
 cozby-tui                    # в новом терминале
 ```
 
-### Сценарий 2 — всё в Docker, кроме TUI
+### Сценарий 2 — self-hosted (всё в docker, кроме TUI)
 
-Сервер собирается в образ, БД/Qdrant/MinIO — рядом. Rust нужен только чтобы поставить TUI.
+Сервер собирается в образ, инфра рядом, один `docker compose up` поднимает всё.
 
 ```bash
 cargo install --path crates/tui    # один раз — ставит cozby-tui в ~/.cargo/bin
-./run-docker.sh                    # build + up всех контейнеров (сервер на :8081)
+./run-docker.sh                    # == docker compose up -d --build (через обёртку с health-check)
+# или напрямую:
+docker compose up -d --build
+
 cozby-tui                          # в новом терминале
 ```
 
-Альтернативный Dockerfile (например, slim/debug-вариант):
+Альтернативный Dockerfile / тег образа:
 
 ```bash
 ./run-docker.sh -f Dockerfile.dev              # путь к Dockerfile
 ./run-docker.sh -f my.Dockerfile -i my:tag     # +своё имя образа
-# либо в .env:  COZBY_DOCKERFILE=Dockerfile.dev
+# либо в .env:  COZBY_DOCKERFILE=Dockerfile.dev  COZBY_IMAGE=cozby-brain:dev
 ```
+
+### Как файлы сосуществуют
+
+- `docker-compose.local.yml` — только инфра (db + qdrant + minio). Используется в сценарии 1.
+- `docker-compose.yml` — инфра через `include:` + сервис `cozby-brain`. Используется в сценарии 2.
+- Контейнеры инфры одни и те же в обоих сценариях (при `COMPOSE_PROJECT_NAME=cozby-brain` из `.env`) — переключаться между сценариями можно без пересоздания БД.
 
 ## Что делает каждый скрипт
 
 | Скрипт | Сценарий | Что делает |
 |---|---|---|
 | `./release.sh` | 1 | `cargo install --release` трёх бинарников в `~/.cargo/bin` + PATH для fish |
-| `./run.sh` | 1 | поднимает docker-инфру, стартует `cozby-brain` на хосте, лог → `logs/` |
-| `./run-docker.sh` | 2 | `docker compose --profile full up -d --build` — инфра + сервер в Docker |
-| `cozby-tui` | 1 и 2 | TUI-клиент, подключается к `http://localhost:8081` |
+| `./run.sh` | 1 | `docker compose -f docker-compose.local.yml up -d` + сборка и запуск сервера на хосте |
+| `./run-docker.sh` | 2 | `docker compose up -d --build` — инфра + сервер в Docker, ждёт `/health` |
+| `cozby-tui` | 1 и 2 | TUI-клиент, подключается к `http://localhost:$HTTP_PORT` |
 
 Команды `run.sh`: `stop` · `status` · `logs` · `clean-logs`.
-Команды `run-docker.sh`: `stop` · `status` · `logs` · `rebuild`.
+Команды `run-docker.sh`: `stop` · `status` · `logs` · `rebuild` · `-f PATH` · `-i TAG`.
 Команды `release.sh`: `uninstall` · `--no-path`.
 
-## .env (минимум)
+## Настройка через .env
+
+Все host-порты и URL подключения — переменные. Если надо сместить порт (скажем, 5432 занят системным postgres):
 
 ```env
-DATABASE_URL=postgres://cozby:cozby@localhost:5432/cozby_brain
-HTTP_ADDR=0.0.0.0:8081
-
-LLM_BASE_URL=https://routerai.ru/api/v1
-LLM_MODEL=qwen/qwen3-coder-480b-a35b-instruct
-LLM_API_KEY=sk-...
-
-EMBEDDING_MODEL=openai/text-embedding-3-small
-
-QDRANT_URL=http://localhost:6334
-QDRANT_COLLECTION=cozby_notes
-
-S3_ENDPOINT=http://localhost:9000
-S3_BUCKET=cozby-attachments
-S3_ACCESS_KEY=minioadmin
-S3_SECRET_KEY=minioadmin
+DB_PORT=5433                                                  # host-side
+DATABASE_URL=postgres://cozby:cozby@localhost:5433/cozby_brain  # подгоняешь URL
 ```
+
+Если сервер в docker должен ходить в **внешний** managed-postgres/qdrant/s3 — переопредели `COZBY_INTERNAL_DB_URL` / `COZBY_INTERNAL_QDRANT_URL` / `COZBY_INTERNAL_S3_ENDPOINT` в `.env`.
+
+Полный список переменных с комментариями — в [.env.example](.env.example).
 
 Избегай reasoning-моделей (`*-thinking`, `glm-4.7-flash`) — бери instruct.
 
