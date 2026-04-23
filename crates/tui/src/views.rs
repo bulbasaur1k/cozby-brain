@@ -253,8 +253,8 @@ fn render_inbox(f: &mut Frame, app: &App, area: Rect) {
 
     let preview_text = if is_ingesting {
         // Маленькая подсказка под полем ввода — как отправить/отменить.
-        "Ctrl+Enter / Alt+Enter / Ctrl+D — отправить   ·   Esc — отменить\n\
-         Enter вставляет перенос строки · @/path/to/file — прочитать файл"
+        "Enter — отправить   ·   Esc — отменить\n\
+         Ctrl+Enter / Alt+Enter — перенос строки · @/path/to/file — прочитать файл"
             .to_string()
     } else if let Some(v) = &app.last_ingest {
         format_ingest_result(v)
@@ -272,7 +272,7 @@ fn render_inbox(f: &mut Frame, app: &App, area: Rect) {
 /// скроллом (чтобы каретка всегда была видна) и миганием курсора в терминале.
 fn render_ingest_input(f: &mut Frame, app: &App, area: Rect, is_ingesting: bool) {
     let label = if is_ingesting {
-        "ingest (Ctrl+Enter → send · Esc → cancel · @/path для файла)"
+        "ingest (Enter → send · Ctrl+Enter — newline · Esc → cancel · @/path файл)"
     } else {
         "ingest (i → edit · @/path для файла)"
     };

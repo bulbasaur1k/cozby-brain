@@ -317,24 +317,13 @@ fn handle_normal(app: &mut App, code: KeyCode, pending_tab_key: &mut bool) -> bo
 }
 
 fn handle_ingest(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
-    // Отправка: Ctrl+Enter / Alt+Enter / Ctrl+D / Ctrl+S.
-    // Разные терминалы по-разному передают Ctrl+Enter — поэтому несколько
-    // комбо. Enter без модификаторов вставляет перенос строки.
-    let is_send = match code {
-        KeyCode::Enter if mods.contains(KeyModifiers::CONTROL) => true,
-        KeyCode::Enter if mods.contains(KeyModifiers::ALT) => true,
-        KeyCode::Char('d') if mods.contains(KeyModifiers::CONTROL) => true,
-        KeyCode::Char('s') if mods.contains(KeyModifiers::CONTROL) => true,
-        _ => false,
-    };
-    if is_send {
-        let text = std::mem::take(&mut app.input).trim().to_string();
-        app.mode = Mode::Normal;
-        if !text.is_empty() {
-            app.loading = true;
-            app.status = "LLM обрабатывает…".into();
-            let _ = app.cmd_tx.send(AppCmd::Ingest(text));
-        }
+    // Перенос строки: Ctrl+Enter / Alt+Enter. Разные терминалы по-разному
+    // передают Ctrl+Enter — оба комбо покрывают ghostty/iTerm/kitty/wezterm.
+    // Чистый Enter отправляет сообщение.
+    let is_newline = matches!(code, KeyCode::Enter)
+        && (mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT));
+    if is_newline {
+        app.input.push('\n');
         return true;
     }
 
@@ -343,7 +332,15 @@ fn handle_ingest(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
             app.mode = Mode::Normal;
             app.input.clear();
         }
-        KeyCode::Enter => app.input.push('\n'),
+        KeyCode::Enter => {
+            let text = std::mem::take(&mut app.input).trim().to_string();
+            app.mode = Mode::Normal;
+            if !text.is_empty() {
+                app.loading = true;
+                app.status = "LLM обрабатывает…".into();
+                let _ = app.cmd_tx.send(AppCmd::Ingest(text));
+            }
+        }
         KeyCode::Tab => app.input.push('\t'),
         KeyCode::Char(c) => app.input.push(c),
         KeyCode::Backspace => {
