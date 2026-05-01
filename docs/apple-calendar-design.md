@@ -1,5 +1,12 @@
 # cozby-brain ↔ Apple Calendar (design)
 
+> **Статус:** v1 (subscribe-feed) реализован — `GET /api/ical/feed.ics`
+> отдаёт VCALENDAR со всеми reminders (RRULE + VALARM). Apple/Google/
+> Outlook Calendar pull'ят его как subscription. Этот документ —
+> roadmap к **v2 (CalDAV PUT)** для near-real-time push.
+
+
+
 > Цель: рекуррентные/одноразовые reminders из cozby попадают как события
 > в стандартный Apple Calendar (iCloud), и видны в нативных приложениях
 > на macOS, iOS, iPadOS. Двусторонняя синхронизация — на этап 2.

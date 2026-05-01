@@ -86,6 +86,25 @@ DATABASE_URL=postgres://cozby:cozby@localhost:5433/cozby_brain  # подгоня
 
 Избегай reasoning-моделей (`*-thinking`, `glm-4.7-flash`) — бери instruct.
 
+## Календарь (Apple / Google / Outlook)
+
+cozby отдаёт все напоминания одним iCalendar-файлом — Apple Calendar и
+другие умеют **subscribe** к этому URL и сами обновляют события.
+Никаких OAuth, app-passwords, CalDAV не нужно.
+
+```
+http://localhost:8081/api/ical/feed.ics
+```
+
+**Apple Calendar** (macOS): `File → New Calendar Subscription` → вставь URL
+выше → выбери частоту обновления (15 минут / час / день).
+Recurring reminders из cozby превращаются в повторяющиеся события с
+нативным алармом в момент срабатывания.
+
+Если cozby крутится не на той же машине, что Calendar.app — пробрось
+порт `8081` или подними сервер на доступном хосте. Auth у feed нет —
+имей в виду на публичных сетях (на старте предполагается localhost-only).
+
 ## TUI — основные клавиши
 
 - `1`–`6` — вкладки (Inbox / Notes / Todos / Reminders / Learning / Docs)

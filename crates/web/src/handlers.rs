@@ -15,6 +15,7 @@ use crate::dto::{
 
 use application::llm_use_cases;
 use application::ports::LlmError;
+use domain::ical;
 use domain::services;
 use actors::note_actor::NoteMsg;
 use actors::reminder_actor::ReminderMsg;
@@ -293,6 +294,38 @@ pub async fn delete_reminder(
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
         Err(e) => internal(e).into_response(),
     }
+}
+
+// ---------- iCalendar subscription feed ----------
+
+/// `GET /api/ical/feed.ics` — отдаёт все напоминания одним VCALENDAR
+/// документом. Apple/Google/Outlook Calendar умеют subscribe по URL и
+/// сами обновляют события (одностороннее: cozby → календарь).
+pub async fn ical_feed(State(state): State<AppState>) -> impl IntoResponse {
+    let reminders = match call!(state.reminder_actor, ReminderMsg::List) {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::error!(error = %e, "ical_feed: list reminders failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let body = ical::calendar_feed(&reminders);
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/calendar; charset=utf-8"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "inline; filename=\"cozby-brain.ics\"",
+            ),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 // ---------- LLM ingest (universal) ----------

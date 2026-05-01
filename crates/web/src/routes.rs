@@ -37,6 +37,8 @@ pub fn create_router(state: AppState) -> Router {
             "/api/reminders/{id}",
             axum::routing::delete(handlers::delete_reminder),
         )
+        // iCalendar feed — subscribe в Apple/Google/Outlook Calendar по URL
+        .route("/api/ical/feed.ics", get(handlers::ical_feed))
         // llm-powered universal ingest + smart search
         .route("/api/ingest", axum::routing::post(handlers::ingest))
         .route(
