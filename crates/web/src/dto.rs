@@ -34,6 +34,9 @@ pub struct CreateTodoDto {
 pub struct CreateReminderDto {
     pub text: String,
     pub remind_at: DateTime<Utc>,
+    /// RRULE-lite, см. domain::recurrence. None = одноразовое.
+    #[serde(default)]
+    pub recurrence: Option<String>,
 }
 
 /// Raw user text for LLM-powered ingestion (notes / todos / reminders).

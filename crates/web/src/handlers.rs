@@ -271,7 +271,13 @@ pub async fn create_reminder(
     State(state): State<AppState>,
     Json(dto): Json<CreateReminderDto>,
 ) -> impl IntoResponse {
-    match call!(state.reminder_actor, ReminderMsg::Create, dto.text, dto.remind_at) {
+    match call!(
+        state.reminder_actor,
+        ReminderMsg::Create,
+        dto.text,
+        dto.remind_at,
+        dto.recurrence.clone()
+    ) {
         Ok(Ok(r)) => (StatusCode::CREATED, Json(json!({ "status": "ok", "data": r }))).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
         Err(e) => internal(e).into_response(),
@@ -364,7 +370,13 @@ pub async fn ingest(
                 }
             }
             Classified::Reminder(r) => {
-                match call!(state.reminder_actor, ReminderMsg::Create, r.text, r.remind_at) {
+                match call!(
+                    state.reminder_actor,
+                    ReminderMsg::Create,
+                    r.text,
+                    r.remind_at,
+                    r.recurrence.clone()
+                ) {
                     Ok(Ok(rem)) => json!({
                         "type": "reminder",
                         "status": "ok",

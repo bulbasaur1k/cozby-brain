@@ -21,6 +21,7 @@ struct ReminderRow {
     text: String,
     remind_at: DateTime<Utc>,
     fired: bool,
+    recurrence: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -31,6 +32,7 @@ impl From<ReminderRow> for Reminder {
             text: r.text,
             remind_at: r.remind_at,
             fired: r.fired,
+            recurrence: r.recurrence,
             created_at: r.created_at,
         }
     }
@@ -41,22 +43,24 @@ impl ReminderRepository for PgReminderRepository {
     async fn upsert(&self, reminder: &Reminder) -> Result<(), RepoError> {
         sqlx::query(
             r#"
-            INSERT INTO reminders (id, text, remind_at, fired, created_at)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO reminders (id, text, remind_at, fired, recurrence, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (id) DO UPDATE SET
-                text      = EXCLUDED.text,
-                remind_at = EXCLUDED.remind_at,
-                fired     = EXCLUDED.fired
+                text       = EXCLUDED.text,
+                remind_at  = EXCLUDED.remind_at,
+                fired      = EXCLUDED.fired,
+                recurrence = EXCLUDED.recurrence
             "#,
         )
         .bind(&reminder.id)
         .bind(&reminder.text)
         .bind(reminder.remind_at)
         .bind(reminder.fired)
+        .bind(&reminder.recurrence)
         .bind(reminder.created_at)
         .execute(&self.pool)
         .await
-            .map_err(|e| RepoError::Database(e.to_string()))?;
+        .map_err(|e| RepoError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -71,11 +75,12 @@ impl ReminderRepository for PgReminderRepository {
 
     async fn list(&self) -> Result<Vec<Reminder>, RepoError> {
         let rows: Vec<ReminderRow> = sqlx::query_as(
-            "SELECT id, text, remind_at, fired, created_at FROM reminders ORDER BY remind_at ASC",
+            "SELECT id, text, remind_at, fired, recurrence, created_at \
+             FROM reminders ORDER BY remind_at ASC",
         )
         .fetch_all(&self.pool)
         .await
-            .map_err(|e| RepoError::Database(e.to_string()))?;
+        .map_err(|e| RepoError::Database(e.to_string()))?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 

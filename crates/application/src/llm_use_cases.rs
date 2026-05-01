@@ -27,6 +27,8 @@ pub struct StructuredTodo {
 pub struct StructuredReminder {
     pub text: String,
     pub remind_at: DateTime<Utc>,
+    /// RRULE-lite (см. domain::recurrence), None = одноразовое.
+    pub recurrence: Option<String>,
 }
 
 // ------------------------- universal classifier -------------------------
@@ -148,8 +150,35 @@ STRICT note templates:
 
 Pick TECH if topic is technical. Otherwise PERSONAL. Preserve ALL user info, improve grammar/structure.
 
+ENRICHMENT RULES for note and doc content:
+You are not a passive recorder — you are a writing assistant. When the user
+gives bare, list-like, or messy input, organize it into clean markdown:
+- Detect implicit structure: days, weeks, steps, levels, categories — turn
+  them into `## headings` or `### sub-headings`. E.g. \"День 1\\nПрисед\\nЖим\"
+  → `## День 1\\n- Присед\\n- Жим`.
+- Group related items into bullet lists. Don't put each item on a separate
+  paragraph if they belong together.
+- Use tables when the data is naturally tabular (sets × reps, schedule,
+  comparisons, key/value pairs).
+- Use ```fenced``` code blocks for code, commands, configs.
+- Use blockquotes (`>`) for cited quotes only.
+- Add a short `## Notes` or `## TL;DR` section at the top ONLY if the input
+  is long enough to benefit from one.
+NEVER invent facts the user did not provide. NEVER pad — quality over volume.
+The output must contain the same information as the input plus structure.
+
 For todo: imperative action phrase (не вопрос, не пожелание). Short and clear.
 For reminder: short text + `remind_at` RFC3339 UTC. If no time given, default: now + 1 hour.
+For recurring reminders, also fill `recurrence` (RRULE-lite, see below). If the
+phrase has no recurrence cue (\"каждый\", \"every\", \"по понедельникам\",
+\"ежедневно\", \"раз в неделю\", \"15-го числа\" etc.), leave `recurrence` as
+null. `remind_at` for a recurring reminder = the FIRST occurrence (today/now
+or the first matching weekday/day-of-month at the requested time).
+Recurrence format (string, all caps, `;`-separated):
+  - FREQ=DAILY                             — каждый день
+  - FREQ=DAILY;INTERVAL=2                  — через день
+  - FREQ=WEEKLY;BYDAY=MO,WE,FR             — пн/ср/пт
+  - FREQ=MONTHLY;BYMONTHDAY=15             — 15-го числа
 For question: extract keywords + scope + OPTIONAL status/time_window filters.
   * keywords: 0-5 topic words (empty if pure listing like \"покажи все задачи\").
   * scope: 'notes' | 'todos' | 'reminders' | 'docs' | 'all'.
@@ -172,7 +201,7 @@ Respond with ONE JSON object, no prose, matching:
 Where data for each type:
 - note:     {\"title\": string, \"content\": string (markdown, strict template), \"tags\": string[] (1-5 lowercase)}
 - todo:     {\"title\": string, \"due_at\": string|null (RFC3339 UTC)}
-- reminder: {\"text\": string, \"remind_at\": string (RFC3339 UTC)}
+- reminder: {\"text\": string, \"remind_at\": string (RFC3339 UTC), \"recurrence\": string|null}
 - question: {\"keywords\": string[], \"scope\": \"notes\"|\"todos\"|\"reminders\"|\"docs\"|\"all\", \"status\": string|null, \"time_window\": string|null}
 - doc:      {\"project\": string, \"page\": string, \"content\": string (markdown), \"tags\": string[], \"operation\": \"append\"|\"section\"|\"replace\"|\"create\", \"section_title\": string|null}
 
@@ -361,7 +390,16 @@ fn parse_reminder_data(v: &Value, now: DateTime<Utc>) -> Result<StructuredRemind
             .with_timezone(&Utc),
         None => now + Duration::hours(1),
     };
-    Ok(StructuredReminder { text, remind_at })
+    let recurrence = v
+        .get("recurrence")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Ok(StructuredReminder {
+        text,
+        remind_at,
+        recurrence,
+    })
 }
 
 fn parse_doc_data(v: &Value) -> Result<StructuredDoc, LlmError> {
@@ -576,6 +614,7 @@ pub async fn parse_reminder(
             StructuredReminder {
                 text: raw.trim().to_string(),
                 remind_at: now + Duration::hours(1),
+                recurrence: None,
             }
         }
     }
@@ -616,6 +655,7 @@ Respond with a single JSON object, no prose:\n\
     Ok(StructuredReminder {
         text: text_field,
         remind_at,
+        recurrence: None,
     })
 }
 

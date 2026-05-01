@@ -242,7 +242,8 @@ fn spawn_learning_ticker(
                     reminder,
                     ReminderMsg::Create,
                     reminder_text,
-                    now
+                    now,
+                    None::<String>
                 );
 
                 // Create Note with full lesson content + `learning` tag

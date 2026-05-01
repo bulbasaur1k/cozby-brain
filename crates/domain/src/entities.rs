@@ -69,6 +69,12 @@ pub struct Reminder {
     pub text: String,
     pub remind_at: DateTime<Utc>,
     pub fired: bool,
+    /// Recurrence rule (RRULE-lite subset). `None` = одноразовый.
+    /// Поддерживается: `FREQ=DAILY`, `FREQ=WEEKLY;BYDAY=MO,WE`,
+    /// `FREQ=MONTHLY;BYMONTHDAY=15`, опциональный `INTERVAL=N`.
+    /// См. domain::recurrence.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub recurrence: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -79,8 +85,18 @@ impl Reminder {
             text,
             remind_at,
             fired: false,
+            recurrence: None,
             created_at: Utc::now(),
         }
+    }
+
+    pub fn with_recurrence(mut self, rule: Option<String>) -> Self {
+        self.recurrence = rule;
+        self
+    }
+
+    pub fn is_recurring(&self) -> bool {
+        self.recurrence.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
     }
 }
 
