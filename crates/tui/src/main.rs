@@ -230,6 +230,12 @@ fn handle_normal(app: &mut App, code: KeyCode, pending_tab_key: &mut bool) -> bo
                 app.mode = Mode::Command;
                 app.command.clear();
             }
+            // 1..9 — открыть ссылку с этим номером в браузере хоста.
+            KeyCode::Char(c @ '1'..='9') => {
+                if let Some(idx) = c.to_digit(10).map(|n| n as usize) {
+                    open_overlay_link(app, idx.saturating_sub(1));
+                }
+            }
             _ => {}
         }
         return true;
@@ -400,6 +406,23 @@ fn handle_search(app: &mut App, code: KeyCode) -> bool {
         _ => {}
     }
     true
+}
+
+/// Открывает ссылку с индексом `idx` (0-based) из текущего opened-объекта,
+/// если это note/doc-страница с markdown-content и в нём есть линки.
+fn open_overlay_link(app: &mut App, idx: usize) {
+    let Some(v) = app.opened.as_ref() else { return };
+    let is_md = matches!(app.tab, Tab::Notes | Tab::Docs);
+    if !is_md {
+        return;
+    }
+    let md = v["content"].as_str().unwrap_or("");
+    let r = markdown::render_with_links(md);
+    let Some(url) = r.links.get(idx) else { return };
+    match markdown::open_url(url) {
+        Ok(()) => app.status = format!("→ открыто [{}] {url}", idx + 1),
+        Err(e) => app.status = format!("не открыть [{}]: {e}", idx + 1),
+    }
 }
 
 fn handle_command(app: &mut App, code: KeyCode) -> bool {

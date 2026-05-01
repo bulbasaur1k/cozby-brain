@@ -7,7 +7,9 @@
 //! - code blocks (выделенный фон)
 //! - blockquotes (accent-полоса слева)
 //! - horizontal rules
-//! - links (подчёркнутые, в цвете link)
+//! - links: показываются подчёркнутыми + индексом `[N]`. URL'ы возвращаются
+//!   отдельным списком — overlay использует его, чтобы по нажатию 1..9
+//!   открывать соответствующую ссылку через `open`/`xdg-open`.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
@@ -15,7 +17,16 @@ use ratatui::text::{Line, Span, Text};
 
 use crate::theme;
 
+pub struct Rendered {
+    pub text: Text<'static>,
+    pub links: Vec<String>,
+}
+
 pub fn render(src: &str) -> Text<'static> {
+    render_with_links(src).text
+}
+
+pub fn render_with_links(src: &str) -> Rendered {
     let parser = Parser::new_ext(src, Options::all());
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current: Vec<Span<'static>> = Vec::new();
@@ -23,6 +34,10 @@ pub fn render(src: &str) -> Text<'static> {
     let mut list_depth: usize = 0;
     let mut in_code_block = false;
     let mut in_blockquote = false;
+    let mut links: Vec<String> = Vec::new();
+    // Стек открытых ссылок: индекс в `links` для каждой (вложенность от md
+    // редко — но pulldown отдаёт Start/End парами, держим стек на всякий случай).
+    let mut link_stack: Vec<usize> = Vec::new();
 
     let flush_line = |current: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>| {
         if !current.is_empty() {
@@ -103,7 +118,8 @@ pub fn render(src: &str) -> Text<'static> {
                     style_stack.push(
                         base.fg(theme::TEAL).add_modifier(Modifier::UNDERLINED),
                     );
-                    let _ = dest_url; // displayed as wiki-link style, url suffixed at End
+                    links.push(dest_url.to_string());
+                    link_stack.push(links.len()); // 1-based индекс
                 }
                 _ => {}
             },
@@ -113,8 +129,21 @@ pub fn render(src: &str) -> Text<'static> {
                     flush_line(&mut current, &mut lines);
                     lines.push(Line::from(""));
                 }
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Link => {
+                TagEnd::Emphasis | TagEnd::Strong => {
                     style_stack.pop();
+                }
+                TagEnd::Link => {
+                    style_stack.pop();
+                    if let Some(idx) = link_stack.pop() {
+                        // Маркер `[N]` — ярче subtext, чтобы было видно, но
+                        // без подчёркивания (ссылочный underline уже снят).
+                        current.push(Span::styled(
+                            format!(" [{idx}]"),
+                            Style::default()
+                                .fg(theme::TEAL)
+                                .add_modifier(Modifier::DIM),
+                        ));
+                    }
                 }
                 TagEnd::CodeBlock => {
                     in_code_block = false;
@@ -153,7 +182,6 @@ pub fn render(src: &str) -> Text<'static> {
             Event::Text(t) => {
                 let style = *style_stack.last().unwrap_or(&Style::default());
                 if in_code_block {
-                    // Code blocks may contain newlines — split into separate lines
                     let s = t.to_string();
                     let parts: Vec<&str> = s.split('\n').collect();
                     for (i, part) in parts.iter().enumerate() {
@@ -196,5 +224,73 @@ pub fn render(src: &str) -> Text<'static> {
         flush_line(&mut current, &mut lines);
     }
 
-    Text::from(lines)
+    // Сводный список ссылок в конце preview — удобно видеть «куда ведут [N]».
+    if !links.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "─ links ─".to_string(),
+            theme::overlay(),
+        )));
+        for (i, url) in links.iter().enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("[{}] ", i + 1),
+                    theme::subtext().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(url.clone(), Style::default().fg(theme::TEAL)),
+            ]));
+        }
+    }
+
+    Rendered {
+        text: Text::from(lines),
+        links,
+    }
+}
+
+/// Открывает URL в системном браузере. Ничего не блокирует —
+/// fire-and-forget. Возвращает Ok(()) если spawn удался.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "windows")]
+    let cmd = "explorer";
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let cmd = "open";
+
+    std::process::Command::new(cmd).arg(url).spawn().map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_links_in_order() {
+        let src = "see [first](https://a.example) and [second](https://b.example).";
+        let r = render_with_links(src);
+        assert_eq!(r.links, vec!["https://a.example", "https://b.example"]);
+    }
+
+    #[test]
+    fn no_links_no_section() {
+        let r = render_with_links("plain **text** without links");
+        assert!(r.links.is_empty());
+    }
+
+    #[test]
+    fn link_indices_are_one_based() {
+        // На сноске должна появиться `[1]` рядом с текстом.
+        let r = render_with_links("[click](https://x)");
+        let dump: String = r
+            .text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(dump.contains("[1]"));
+    }
 }

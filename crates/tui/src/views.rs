@@ -537,18 +537,24 @@ fn render_detail_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     // Content: markdown if note/page, else structured text
     let is_md = app.tab == Tab::Notes || app.tab == Tab::Docs;
-    let body = if is_md {
+    let (body, has_links) = if is_md {
         let md = v["content"].as_str().unwrap_or("");
-        markdown::render(md)
+        let r = markdown::render_with_links(md);
+        let has = !r.links.is_empty();
+        (r.text, has)
     } else {
-        Text::from(format_detail(app.tab, v))
+        (Text::from(format_detail(app.tab, v)), false)
     };
 
     let title = v["title"]
         .as_str()
         .or_else(|| v["text"].as_str())
         .unwrap_or("detail");
-    let title_full = format!("{title}  (Esc close · d delete · j/k scroll)");
+    let title_full = if has_links {
+        format!("{title}  (Esc close · 1-9 open link · d delete · j/k scroll)")
+    } else {
+        format!("{title}  (Esc close · d delete · j/k scroll)")
+    };
 
     let p = Paragraph::new(body)
         .wrap(Wrap { trim: false })
