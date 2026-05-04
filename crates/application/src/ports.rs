@@ -157,6 +157,9 @@ pub trait DocPageRepository: Send + Sync {
         query: &str,
     ) -> Result<Vec<DocPage>, RepoError>;
     async fn list_by_project(&self, project_id: &str) -> Result<Vec<DocPage>, RepoError>;
+    /// Global keyword search across all projects — matches title OR content (ILIKE).
+    /// Used as fallback when vector search misses (Qdrant down or page not yet indexed).
+    async fn search_all(&self, query: &str, limit: usize) -> Result<Vec<DocPage>, RepoError>;
 }
 
 #[async_trait]

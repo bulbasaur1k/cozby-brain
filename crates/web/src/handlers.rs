@@ -427,8 +427,9 @@ pub async fn ingest(
                 };
                 let (notes, todos, reminders) =
                     search_with_filters(&state, &q.keywords, filters).await;
-                let (rag_sources, rag_answer) =
-                    rag_answer(&state, &q.query).await.unwrap_or((Vec::new(), None));
+                let (rag_sources, rag_answer) = rag_answer(&state, &q.query, &q.keywords)
+                    .await
+                    .unwrap_or((Vec::new(), None));
                 json!({
                     "type": "question",
                     "status": "ok",
@@ -787,8 +788,9 @@ pub async fn ask(
         search_with_filters(&state, &keywords, filters).await;
 
     // 3. RAG — embed query, search top-K across notes + doc_pages
-    let (rag_sources, rag_answer) =
-        rag_answer(&state, &q.q).await.unwrap_or((Vec::new(), None));
+    let (rag_sources, rag_answer) = rag_answer(&state, &q.q, &keywords)
+        .await
+        .unwrap_or((Vec::new(), None));
 
     (
         StatusCode::OK,
@@ -812,60 +814,87 @@ pub async fn ask(
 }
 
 /// Retrieve-augmented generation for a question.
-/// Returns `(sources, answer)` — sources are always provided if vector search
-/// worked, answer may be None if LLM/embedding not configured.
+/// Returns `(sources, answer)` — sources are always provided if any search
+/// (vector or keyword fallback) found content; answer may be None if LLM is
+/// not configured.
+///
+/// `keywords` are extracted by the classifier — used as fallback when vector
+/// search returns nothing (Qdrant down, page not yet indexed by fire-and-forget
+/// indexer, embedding model mismatch, etc.). Keeps "add page → ask immediately"
+/// flow robust.
 async fn rag_answer(
     state: &AppState,
     question: &str,
+    keywords: &[String],
 ) -> Option<(Vec<serde_json::Value>, Option<String>)> {
-    // 1. Embed
-    let vector = match state.embedding.embed(question).await {
-        Ok(v) => v,
+    // 1. Vector search (primary path)
+    let mut context_items: Vec<(String, String, String, String, f32)> = Vec::new(); // (kind, id, title, content, score)
+
+    let vector_hits = match state.embedding.embed(question).await {
+        Ok(v) => state.vector.search(v, 6).await.unwrap_or_default(),
         Err(e) => {
             if !matches!(e, LlmError::NotConfigured) {
-                tracing::warn!(error = %e, "rag: embed failed");
+                tracing::warn!(error = %e, "rag: embed failed, falling back to keyword search");
             }
-            return None;
+            Vec::new()
         }
     };
 
-    // 2. Search across all kinds
-    let hits = state.vector.search(vector, 6).await.unwrap_or_default();
-    if hits.is_empty() {
-        return Some((Vec::new(), None));
-    }
-
-    // 3. Fetch full content for each hit
-    let mut context_items: Vec<(String, String, String, String, f32)> = Vec::new(); // (kind, id, title, content, score)
-    for hit in &hits {
+    for hit in &vector_hits {
         match hit.kind.as_str() {
             application::ports::KIND_NOTE => {
-                if let Ok(Some(n)) =
-                    call!(state.note_actor, NoteMsg::Get, hit.id.clone())
-                {
-                    context_items.push((
-                        "note".into(),
-                        n.id,
-                        n.title,
-                        n.content,
-                        hit.score,
-                    ));
+                if let Ok(Some(n)) = call!(state.note_actor, NoteMsg::Get, hit.id.clone()) {
+                    context_items.push(("note".into(), n.id, n.title, n.content, hit.score));
                 }
             }
             application::ports::KIND_DOC_PAGE => {
-                if let Ok(Some(p)) =
-                    call!(state.doc_actor, actors::doc_actor::DocMsg::GetPage, hit.id.clone())
-                {
-                    context_items.push((
-                        "doc_page".into(),
-                        p.id,
-                        p.title,
-                        p.content,
-                        hit.score,
-                    ));
+                if let Ok(Some(p)) = call!(
+                    state.doc_actor,
+                    actors::doc_actor::DocMsg::GetPage,
+                    hit.id.clone()
+                ) {
+                    context_items.push(("doc_page".into(), p.id, p.title, p.content, hit.score));
                 }
             }
             _ => {}
+        }
+    }
+
+    // 2. Keyword fallback when vector misses entirely. Reasons it can miss:
+    //    fire-and-forget index_async hadn't completed yet, embedding service
+    //    had a hiccup, or Qdrant was reset. Score=0 marks fallback hits.
+    if context_items.is_empty() {
+        let candidates: Vec<&str> = if keywords.is_empty() {
+            vec![question]
+        } else {
+            keywords.iter().map(String::as_str).collect()
+        };
+        for kw in &candidates {
+            if let Ok(notes) = call!(state.note_actor, NoteMsg::Search, kw.to_string()) {
+                for n in notes.into_iter().take(3) {
+                    if !context_items.iter().any(|t| t.1 == n.id) {
+                        context_items.push(("note".into(), n.id, n.title, n.content, 0.0));
+                    }
+                }
+            }
+            if let Ok(pages) = call!(
+                state.doc_actor,
+                actors::doc_actor::DocMsg::SearchPages,
+                kw.to_string(),
+                3
+            ) {
+                for p in pages.into_iter() {
+                    if !context_items.iter().any(|t| t.1 == p.id) {
+                        context_items.push(("doc_page".into(), p.id, p.title, p.content, 0.0));
+                    }
+                }
+            }
+        }
+        if !context_items.is_empty() {
+            tracing::debug!(
+                hits = context_items.len(),
+                "rag: vector empty, used keyword fallback"
+            );
         }
     }
 

@@ -48,6 +48,12 @@ pub enum DocMsg {
         RpcReplyPort<Option<DocPage>>,
     ),
     DeletePage(String, RpcReplyPort<Result<(), String>>),
+    /// Global keyword search across all projects (title OR content ILIKE).
+    SearchPages(
+        String, // query
+        usize,  // limit
+        RpcReplyPort<Vec<DocPage>>,
+    ),
 
     // History
     ListPageHistory(String, RpcReplyPort<Vec<DocPageVersion>>),
@@ -156,6 +162,14 @@ impl Actor for DocActor {
                     .await
                     .map_err(|e| e.to_string());
                 let _ = reply.send(result);
+            }
+            DocMsg::SearchPages(query, limit, reply) => {
+                let pages = self
+                    .page_repo
+                    .search_all(&query, limit)
+                    .await
+                    .unwrap_or_default();
+                let _ = reply.send(pages);
             }
             DocMsg::ListPageHistory(page_id, reply) => {
                 let versions = self

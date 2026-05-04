@@ -269,6 +269,23 @@ impl DocPageRepository for PgDocPageRepository {
         .map_err(|e| RepoError::Database(e.to_string()))?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
+
+    async fn search_all(&self, query: &str, limit: usize) -> Result<Vec<DocPage>, RepoError> {
+        let pattern = format!("%{query}%");
+        let rows: Vec<PageRow> = sqlx::query_as(
+            r#"SELECT id, project_id, slug, title, content, version, tags, created_at, updated_at
+               FROM doc_pages
+               WHERE title ILIKE $1 OR content ILIKE $1
+               ORDER BY updated_at DESC
+               LIMIT $2"#,
+        )
+        .bind(pattern)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RepoError::Database(e.to_string()))?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
 }
 
 // ---------------- DocPageVersion (history) ----------------
