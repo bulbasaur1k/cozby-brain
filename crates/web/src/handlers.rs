@@ -427,9 +427,14 @@ pub async fn ingest(
                 };
                 let (notes, todos, reminders) =
                     search_with_filters(&state, &q.keywords, filters).await;
+                let (rag_sources, rag_answer) =
+                    rag_answer(&state, &q.query).await.unwrap_or((Vec::new(), None));
                 json!({
                     "type": "question",
                     "status": "ok",
+                    "question": q.query,
+                    "answer": rag_answer,
+                    "sources": rag_sources,
                     "keywords": q.keywords,
                     "scope": q.scope,
                     "status_filter": q.status,

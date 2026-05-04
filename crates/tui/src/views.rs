@@ -812,23 +812,71 @@ fn format_ingest_result(v: &Value) -> String {
     if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
         let mut out = format!("[+] classified {} items:\n\n", items.len());
         for (i, it) in items.iter().enumerate() {
-            let kind = it["type"].as_str().unwrap_or("?");
-            let title = it["data"]["title"]
-                .as_str()
-                .or_else(|| it["data"]["text"].as_str())
-                .or_else(|| it["structured"]["title"].as_str())
-                .unwrap_or("?");
-            out.push_str(&format!("  {}. [{}] {}\n", i + 1, kind, title));
+            out.push_str(&format!("  {}. {}\n", i + 1, format_one_item(it)));
         }
         return out;
     }
+    format!("[+] {}", format_one_item(v))
+}
+
+fn format_one_item(v: &Value) -> String {
     let kind = v["type"].as_str().unwrap_or("?");
+    if kind == "question" {
+        return format_question(v);
+    }
     let title = v["data"]["title"]
         .as_str()
         .or_else(|| v["data"]["text"].as_str())
         .or_else(|| v["structured"]["title"].as_str())
         .unwrap_or("?");
-    format!("[+] {kind}: {title}")
+    format!("[{kind}] {title}")
+}
+
+fn format_question(v: &Value) -> String {
+    let mut out = String::new();
+    if let Some(answer) = v.get("answer").and_then(|x| x.as_str()) {
+        if !answer.trim().is_empty() {
+            out.push_str(answer.trim());
+            out.push('\n');
+        }
+    }
+    if let Some(sources) = v.get("sources").and_then(|x| x.as_array()) {
+        if !sources.is_empty() {
+            out.push_str("\nИсточники:\n");
+            for s in sources {
+                let n = s.get("n").and_then(|x| x.as_u64()).unwrap_or(0);
+                let kind = s.get("kind").and_then(|x| x.as_str()).unwrap_or("?");
+                let title = s.get("title").and_then(|x| x.as_str()).unwrap_or("?");
+                out.push_str(&format!("  [{n}] ({kind}) {title}\n"));
+            }
+        }
+    }
+    let data = v.get("data").cloned().unwrap_or_default();
+    let counts = [
+        ("notes", data.get("notes").and_then(|x| x.as_array()).map_or(0, |a| a.len())),
+        ("todos", data.get("todos").and_then(|x| x.as_array()).map_or(0, |a| a.len())),
+        ("reminders", data.get("reminders").and_then(|x| x.as_array()).map_or(0, |a| a.len())),
+    ];
+    let extra: Vec<String> = counts
+        .iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(name, n)| format!("{name}: {n}"))
+        .collect();
+    if !extra.is_empty() {
+        out.push_str(&format!("\nКлючевые совпадения — {}\n", extra.join(", ")));
+    }
+    if out.trim().is_empty() {
+        let kw: Vec<String> = v
+            .get("keywords")
+            .and_then(|x| x.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if kw.is_empty() {
+            return "[?] ничего не нашёл".into();
+        }
+        return format!("[?] ничего не нашёл по: {}", kw.join(", "));
+    }
+    format!("[?] {}", out.trim_end())
 }
 
 fn truncate(s: &str, max: usize) -> String {
