@@ -4,6 +4,7 @@ use ractor::ActorRef;
 use sqlx::PgPool;
 
 use application::ports::{EmbeddingClient, LlmClient, VectorStore};
+use application::skills::Skill;
 use actors::doc_actor::DocMsg;
 use actors::learning_actor::LearningMsg;
 use actors::node_actor::NodeMsg;
@@ -24,6 +25,8 @@ pub struct AppState {
     pub embedding: Arc<dyn EmbeddingClient>,
     pub vector: Arc<dyn VectorStore>,
     pub attachments: Arc<dyn AttachmentStore>,
+    /// Файловые скилы, загруженные при старте (агент инжектит их в промпт).
+    pub skills: Arc<Vec<Skill>>,
     #[allow(dead_code)]
     pub db: PgPool,
 }

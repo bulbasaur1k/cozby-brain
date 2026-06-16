@@ -186,6 +186,16 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
     .await?;
     tracing::info!("node actor spawned");
 
+    // --- file-based skills (loaded once at startup) ---
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let skills = application::skills::discover_skills(&application::skills::default_skill_roots(&cwd));
+    tracing::info!(
+        count = skills.len(),
+        names = ?skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        "skills loaded"
+    );
+    let skills = Arc::new(skills);
+
     spawn_reminder_ticker(reminder_actor.clone(), Duration::from_secs(10));
     spawn_learning_ticker(
         learning_actor.clone(),
@@ -205,6 +215,7 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
         embedding,
         vector,
         attachments,
+        skills,
         db: pool,
     };
     Ok((create_router(state), cfg))
