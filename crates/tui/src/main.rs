@@ -6,6 +6,7 @@
 //!   j / k   ↓ / ↑         навигация
 //!   g / G                 первый / последний
 //!   Enter  /  o           открыть запись (detail или раскрыть проект в Docs)
+//!   в detail: 1-9         открыть ссылку в браузере; o — экран ссылок (OSC 8, CMD+click)
 //!   Space                 toggle done (для todo)
 //!   d                     удалить (с подтверждением y/n)
 //!   i                     ingest
@@ -84,7 +85,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run<B: ratatui::backend::Backend>(
+async fn run<B: ratatui::backend::Backend + std::io::Write>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     ev_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
@@ -105,6 +106,15 @@ async fn run<B: ratatui::backend::Backend>(
                 if !handle_key(app, key.code, key.modifiers, &mut pending_tab_key) {
                     break;
                 }
+            }
+        }
+
+        // OSC 8 экран ссылок (требует прямого доступа к терминалу).
+        if app.show_links {
+            app.show_links = false;
+            let links = overlay_links(app);
+            if !links.is_empty() {
+                show_links_screen(terminal, &links)?;
             }
         }
 
@@ -234,6 +244,14 @@ fn handle_normal(app: &mut App, code: KeyCode, pending_tab_key: &mut bool) -> bo
             KeyCode::Char(c @ '1'..='9') => {
                 if let Some(idx) = c.to_digit(10).map(|n| n as usize) {
                     open_overlay_link(app, idx.saturating_sub(1));
+                }
+            }
+            // o — экран ссылок с OSC 8 (CMD+click в iTerm2/wezterm/kitty).
+            KeyCode::Char('o') => {
+                if overlay_links(app).is_empty() {
+                    app.status = "в записи нет ссылок".into();
+                } else {
+                    app.show_links = true;
                 }
             }
             _ => {}
@@ -408,21 +426,59 @@ fn handle_search(app: &mut App, code: KeyCode) -> bool {
     true
 }
 
+/// Ссылки из текущего opened-объекта (note/doc markdown-content).
+fn overlay_links(app: &App) -> Vec<String> {
+    let Some(v) = app.opened.as_ref() else {
+        return Vec::new();
+    };
+    if !matches!(app.tab, Tab::Notes | Tab::Docs) {
+        return Vec::new();
+    }
+    let md = v["content"].as_str().unwrap_or("");
+    markdown::render_with_links(md).links
+}
+
 /// Открывает ссылку с индексом `idx` (0-based) из текущего opened-объекта,
 /// если это note/doc-страница с markdown-content и в нём есть линки.
 fn open_overlay_link(app: &mut App, idx: usize) {
-    let Some(v) = app.opened.as_ref() else { return };
-    let is_md = matches!(app.tab, Tab::Notes | Tab::Docs);
-    if !is_md {
-        return;
-    }
-    let md = v["content"].as_str().unwrap_or("");
-    let r = markdown::render_with_links(md);
-    let Some(url) = r.links.get(idx) else { return };
+    let links = overlay_links(app);
+    let Some(url) = links.get(idx) else { return };
     match markdown::open_url(url) {
         Ok(()) => app.status = format!("→ открыто [{}] {url}", idx + 1),
         Err(e) => app.status = format!("не открыть [{}]: {e}", idx + 1),
     }
+}
+
+/// Полноэкранный список ссылок с OSC 8 hyperlink'ами. Пишем напрямую через
+/// crossterm (минуя ratatui-буфер, который не пропускает OSC 8), ждём клавишу,
+/// затем `terminal.clear()` форсит ratatui перерисовать UI.
+fn show_links_screen<B: ratatui::backend::Backend + std::io::Write>(
+    terminal: &mut Terminal<B>,
+    links: &[String],
+) -> Result<()> {
+    use crossterm::cursor::MoveTo;
+    use crossterm::style::Print;
+    use crossterm::terminal::{Clear, ClearType};
+    use crossterm::queue;
+
+    let out = terminal.backend_mut();
+    queue!(out, Clear(ClearType::All), MoveTo(0, 0))?;
+    queue!(out, Print("Ссылки — CMD+click (iTerm2/wezterm/kitty), или цифра в detail:\r\n\r\n"))?;
+    for (i, url) in links.iter().enumerate() {
+        let label = format!("  [{}] {}", i + 1, url);
+        queue!(out, Print(markdown::osc8(url, &label)), Print("\r\n"))?;
+    }
+    queue!(out, Print("\r\nНажми любую клавишу, чтобы вернуться…"))?;
+    std::io::Write::flush(out)?;
+
+    // Блокирующе ждём один key-event (мышиные/прочие события игнорим).
+    loop {
+        if let Event::Key(_) = event::read()? {
+            break;
+        }
+    }
+    terminal.clear()?;
+    Ok(())
 }
 
 fn handle_command(app: &mut App, code: KeyCode) -> bool {
