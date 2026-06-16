@@ -128,6 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Добавляем сервер
     mcp_client.add_server(ServerConfig {
         name: "dpWiki".to_string(),
+        timeout_ms: ServerConfig::default_timeout(),
         transport: TransportType::Stdio {
             command: "dp".to_string(),
             args: vec!["ai".into(), "mcp".into(), "wixie".into()],

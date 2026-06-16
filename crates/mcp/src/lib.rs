@@ -12,7 +12,7 @@ pub mod tools;
 
 pub use agent::{AgentBuilder, AgentState, AgentTask, CozbyAgent};
 pub use client::McpClient;
-pub use config::McpConfig;
+pub use config::{McpConfig, McpConfigError};
 pub use protocol::*;
 pub use server::McpServer;
 pub use server::ServerConfig;

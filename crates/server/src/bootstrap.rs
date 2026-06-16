@@ -196,6 +196,30 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
     );
     let skills = Arc::new(skills);
 
+    // --- MCP servers (company-internal tool sources for the agent) ---
+    // Конфиг из MCP_CONFIG (default ./mcp-config.json). Файла нет → пустой
+    // клиент (агент работает только с внутренними tool'ами). Ошибки серверов
+    // логируем, не падаем (как qdrant/s3).
+    let mcp_client = mcp::McpClient::new();
+    let mcp_config_path =
+        std::env::var("MCP_CONFIG").unwrap_or_else(|_| "mcp-config.json".to_string());
+    match mcp::McpConfig::from_file(&mcp_config_path) {
+        Ok(mcp_cfg) => {
+            for sc in mcp_cfg.to_server_configs() {
+                let name = sc.name.clone();
+                match mcp_client.add_server(sc).await {
+                    Ok(()) => tracing::info!(server = %name, "mcp server connected"),
+                    Err(e) => tracing::warn!(server = %name, error = %e, "mcp server connect failed; skipping"),
+                }
+            }
+        }
+        Err(mcp::McpConfigError::Io(_)) => {
+            tracing::info!(path = %mcp_config_path, "no mcp-config — MCP disabled");
+        }
+        Err(e) => tracing::warn!(error = %e, "mcp config parse failed; MCP disabled"),
+    }
+    let mcp_client = Arc::new(mcp_client);
+
     spawn_reminder_ticker(reminder_actor.clone(), Duration::from_secs(10));
     spawn_learning_ticker(
         learning_actor.clone(),
@@ -216,6 +240,7 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
         vector,
         attachments,
         skills,
+        mcp: mcp_client,
         db: pool,
     };
     Ok((create_router(state), cfg))

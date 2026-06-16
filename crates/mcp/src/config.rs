@@ -160,6 +160,7 @@ impl McpConfig {
             .filter(|s| s.enabled && self.enabled_servers.is_empty() || self.enabled_servers.contains(&s.name))
             .map(|s| ServerConfig {
                 name: s.name.clone(),
+                timeout_ms: self.timeout_ms,
                 transport: match &s.transport {
                     TransportConfig::Stdio { command, args, env } => {
                         TransportType::Stdio {

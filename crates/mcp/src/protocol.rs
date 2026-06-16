@@ -47,6 +47,7 @@ pub struct JsonRpcError {
 
 /// MCP Initialize request params
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     pub protocol_version: String,
     pub capabilities: ClientCapabilities,
@@ -54,6 +55,7 @@ pub struct InitializeParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roots: Option<RootsCapability>,
@@ -62,6 +64,7 @@ pub struct ClientCapabilities {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RootsCapability {
     pub list_changed: Option<bool>,
 }
@@ -74,6 +77,7 @@ pub struct ClientInfo {
 
 /// MCP Initialize response
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeResult {
     pub protocol_version: String,
     pub capabilities: ServerCapabilities,
@@ -91,6 +95,7 @@ pub struct ServerCapabilities {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolsCapability {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_changed: Option<bool>,
@@ -104,6 +109,7 @@ pub struct ServerInfo {
 
 /// MCP Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Tool {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,6 +119,7 @@ pub struct Tool {
 
 /// MCP List Tools response
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListToolsResult {
     pub tools: Vec<Tool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,6 +136,7 @@ pub struct CallToolParams {
 
 /// MCP Call Tool response
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CallToolResult {
     pub content: Vec<ToolContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,7 +144,7 @@ pub struct CallToolResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum ToolContent {
     #[serde(rename = "text")]
     Text { text: String },

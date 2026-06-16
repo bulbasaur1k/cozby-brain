@@ -6,3 +6,6 @@
 /.idea
 .vscode
 
+
+# MCP server config — содержит корп-эндпоинты/секреты
+mcp-config.json

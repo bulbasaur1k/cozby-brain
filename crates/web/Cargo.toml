@@ -7,6 +7,7 @@ edition.workspace = true
 application = { path = "../application", package = "cb-application" }
 domain = { path = "../domain", package = "cb-domain" }
 actors = { path = "../actors", package = "cb-actors" }
+mcp = { path = "../mcp", package = "cb-mcp" }
 axum = "0.8"
 serde.workspace = true
 serde_json.workspace = true

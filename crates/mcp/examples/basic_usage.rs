@@ -14,6 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // dpWiki - работа с Confluence
     client.add_server(ServerConfig {
         name: "dpWiki".to_string(),
+        timeout_ms: ServerConfig::default_timeout(),
         transport: TransportType::Stdio {
             command: "dp".to_string(),
             args: vec!["ai".into(), "mcp".into(), "wixie".into()],
@@ -24,6 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Пример 2: Добавление MCP сервера dpJira
     client.add_server(ServerConfig {
         name: "dpJira".to_string(),
+        timeout_ms: ServerConfig::default_timeout(),
         transport: TransportType::Stdio {
             command: "dp".to_string(),
             args: vec!["ai".into(), "mcp".into(), "jira".into()],
@@ -34,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Пример 3: HTTP транспорт (для удалённых серверов)
     client.add_server(ServerConfig {
         name: "remote-server".to_string(),
+        timeout_ms: ServerConfig::default_timeout(),
         transport: TransportType::Http {
             url: "http://localhost:8080/mcp".to_string(),
             headers: vec![],

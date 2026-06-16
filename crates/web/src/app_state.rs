@@ -5,6 +5,7 @@ use sqlx::PgPool;
 
 use application::ports::{EmbeddingClient, LlmClient, VectorStore};
 use application::skills::Skill;
+use mcp::McpClient;
 use actors::doc_actor::DocMsg;
 use actors::learning_actor::LearningMsg;
 use actors::node_actor::NodeMsg;
@@ -27,6 +28,8 @@ pub struct AppState {
     pub attachments: Arc<dyn AttachmentStore>,
     /// Файловые скилы, загруженные при старте (агент инжектит их в промпт).
     pub skills: Arc<Vec<Skill>>,
+    /// Подключённые MCP-серверы компании (источник внешних tool'ов для агента).
+    pub mcp: Arc<McpClient>,
     #[allow(dead_code)]
     pub db: PgPool,
 }
