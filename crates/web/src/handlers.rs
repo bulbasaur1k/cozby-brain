@@ -70,7 +70,7 @@ pub(crate) fn unindex_async(state: AppState, id: String) {
 /// Fetch top-5 similar existing notes + doc_pages, return as compact tuples
 /// `(kind, title, tags, preview)` for feeding into classifier context.
 /// Returns empty Vec if embedding/vector are not configured or return nothing.
-async fn gather_context_items(
+pub(crate) async fn gather_context_items(
     state: &AppState,
     raw: &str,
 ) -> Vec<(String, String, String, String)> {
@@ -100,6 +100,19 @@ async fn gather_context_items(
                     let tags = p.tags.join(", ");
                     let preview = p.content.lines().next().unwrap_or("").to_string();
                     out.push(("doc".to_string(), p.title, tags, preview));
+                }
+            }
+            application::ports::KIND_NODE => {
+                if let Ok(Some(n)) =
+                    call!(state.node_actor, actors::node_actor::NodeMsg::Get, hit.id.clone())
+                {
+                    let tags = n.tags.join(", ");
+                    let preview = if n.summary.is_empty() {
+                        format!("узел ({})", n.kind)
+                    } else {
+                        n.summary.lines().next().unwrap_or("").to_string()
+                    };
+                    out.push(("node".to_string(), n.title, tags, preview));
                 }
             }
             _ => {}
@@ -337,11 +350,48 @@ pub async fn ical_feed(State(state): State<AppState>) -> impl IntoResponse {
 /// - question: returns search results across all entities
 ///
 /// Returns 503 if LLM is not configured — this endpoint is LLM-mandatory.
+/// Включён ли многошаговый агент. Опт-ин через env `INGEST_AGENT` (1/true/on).
+fn agent_enabled() -> bool {
+    std::env::var("INGEST_AGENT")
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Формирует HTTP-ответ из результата агента (узел + его члены).
+fn agent_response(outcome: crate::agent::AgentOutcome) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "type": "node",
+            "data": {
+                "node": outcome.node,
+                "members": outcome.members,
+            },
+            "agent": {
+                "iterations": outcome.iterations,
+                "used_fallback": outcome.used_fallback,
+                "log": outcome.log,
+            }
+        })),
+    )
+}
+
 pub async fn ingest(
     State(state): State<AppState>,
     Json(dto): Json<IngestRawDto>,
 ) -> impl IntoResponse {
     tracing::debug!(len = dto.raw.len(), llm = state.llm.name(), "universal ingest");
+
+    // Многошаговый агент (опт-ин через env INGEST_AGENT=1). Собирает узел из
+    // нескольких сущностей + MCP-контекста. При неудаче — падаем на старый путь.
+    if agent_enabled() {
+        let agent = crate::agent::IngestAgent::new(&state);
+        if let Some(outcome) = agent.run(&dto.raw).await {
+            return agent_response(outcome).into_response();
+        }
+        tracing::info!("ingest agent produced nothing — falling back to classifier");
+    }
 
     // RAG-aware: fetch top-5 similar existing items to inform the classifier
     let context_items = gather_context_items(&state, &dto.raw).await;
@@ -863,6 +913,27 @@ async fn rag_answer(
                         p.content,
                         hit.score,
                     ));
+                }
+            }
+            application::ports::KIND_NODE => {
+                if let Ok(Some(n)) =
+                    call!(state.node_actor, actors::node_actor::NodeMsg::Get, hit.id.clone())
+                {
+                    // собираем members в текст, чтобы RAG мог цитировать ссылки узла
+                    let members = call!(
+                        state.node_actor,
+                        actors::node_actor::NodeMsg::ListMembers,
+                        n.id.clone()
+                    )
+                    .unwrap_or_default();
+                    let mut content = n.summary.clone();
+                    for m in members {
+                        content.push_str(&format!(
+                            "\n- [{}/{}] {} {}",
+                            m.member_kind, m.role, m.label, m.member_id
+                        ));
+                    }
+                    context_items.push(("node".into(), n.id, n.title, content, hit.score));
                 }
             }
             _ => {}

@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod app_state;
 pub mod doc_handlers;
 pub mod dto;
