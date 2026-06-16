@@ -198,6 +198,8 @@ pub struct App {
 
     /// Full-screen detail of opened item (None = list mode).
     pub opened: Option<Value>,
+    /// Запрос показать OSC 8 экран ссылок (обрабатывается в главном цикле).
+    pub show_links: bool,
 
     /// Expanded projects in Docs tab (project_id → set).
     pub expanded_projects: HashSet<String>,
@@ -233,6 +235,7 @@ impl App {
             last_ingest: None,
             detail_scroll: 0,
             opened: None,
+            show_links: false,
             expanded_projects: HashSet::new(),
             doc_pages: HashMap::new(),
             todo_filter: TodoFilter::LastDays(5),

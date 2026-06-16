@@ -97,7 +97,7 @@ impl Actor for NoteActor {
             }
             NoteMsg::List(reply) => {
                 let mut all: Vec<Note> = state.values().cloned().collect();
-                all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                all.sort_by_key(|n| std::cmp::Reverse(n.updated_at));
                 let _ = reply.send(all);
             }
             NoteMsg::Search(q, reply) => {
@@ -110,7 +110,7 @@ impl Actor for NoteActor {
                     })
                     .cloned()
                     .collect();
-                matches.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                matches.sort_by_key(|n| std::cmp::Reverse(n.updated_at));
                 let _ = reply.send(matches);
             }
         }

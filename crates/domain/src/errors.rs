@@ -6,4 +6,6 @@ pub enum DomainError {
     InvalidTitle,
     #[error("invalid title: too long (max 256)")]
     TitleTooLong,
+    #[error("invalid node kind: {0}")]
+    InvalidKind(String),
 }

@@ -799,6 +799,115 @@ Given a new note and a list of similar existing notes, respond with JSON only:\n
     }
 }
 
+// ------------------------- node matching -------------------------
+
+/// Кандидат-узел для матча (из vector.search_by_kind(KIND_NODE, ...)).
+#[derive(Debug, Clone)]
+pub struct NodeCandidate {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub summary: String,
+    pub score: f32,
+}
+
+/// Результат матча нового материала на существующий узел.
+#[derive(Debug, Clone)]
+pub struct NodeMatch {
+    pub node_id: String,
+    pub reason: String,
+    pub confidence: f32,
+}
+
+/// Решает, относится ли новый материал к существующему узлу (а не к новому).
+/// Infallible: при ошибке LLM — fallback на top-кандидата с vector-score > 0.85.
+pub async fn match_node(
+    llm: &dyn LlmClient,
+    new_title: &str,
+    new_preview: &str,
+    candidates: &[NodeCandidate],
+) -> Option<NodeMatch> {
+    if candidates.is_empty() {
+        return None;
+    }
+    match try_match_node(llm, new_title, new_preview, candidates).await {
+        Ok(m) => m,
+        Err(e) => {
+            if !matches!(e, LlmError::NotConfigured) {
+                tracing::warn!(error = %e, "llm match_node failed");
+            }
+            candidates
+                .first()
+                .filter(|c| c.score > 0.85)
+                .map(|c| NodeMatch {
+                    node_id: c.id.clone(),
+                    reason: "высокое совпадение по вектору".into(),
+                    confidence: c.score,
+                })
+        }
+    }
+}
+
+async fn try_match_node(
+    llm: &dyn LlmClient,
+    new_title: &str,
+    new_preview: &str,
+    candidates: &[NodeCandidate],
+) -> Result<Option<NodeMatch>, LlmError> {
+    let candidates_str: String = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            format!(
+                "{}. [id={}] kind={} \"{}\" — {} (score: {:.2})",
+                i + 1,
+                c.id,
+                c.kind,
+                c.title,
+                c.summary.chars().take(120).collect::<String>(),
+                c.score
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let system = "Ты решаешь, относится ли новый материал к одному из существующих узлов.\n\
+Узел — это составная сущность (дежурство/инцидент/тема), объединяющая записи.\n\
+Ответь строго JSON:\n\
+{\"match\": true/false, \"node_id\": string|null, \"confidence\": 0.0..1.0, \"reason\": string}\n\
+- match=true только если материал явно про ту же тему/дежурство/инцидент.\n\
+- Если сомневаешься — match=false.\n\
+- reason: короткое пояснение на языке материала.";
+    let user_msg = format!(
+        "Новый материал:\n  заголовок: {new_title}\n  превью: {new_preview}\n\nСуществующие узлы:\n{candidates_str}"
+    );
+    let text = llm.complete_text(system, &user_msg).await?;
+    let json = extract_json(&text).ok_or_else(|| LlmError::BadResponse("no json".into()))?;
+    let v: Value = serde_json::from_str(json).map_err(|e| LlmError::BadResponse(e.to_string()))?;
+    if !v.get("match").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return Ok(None);
+    }
+    let node_id = v
+        .get("node_id")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| LlmError::BadResponse("missing node_id".into()))?
+        .to_string();
+    // принимаем только известный id
+    if !candidates.iter().any(|c| c.id == node_id) {
+        return Ok(None);
+    }
+    let confidence = v.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
+    let reason = v
+        .get("reason")
+        .and_then(|x| x.as_str())
+        .unwrap_or("тема совпадает")
+        .to_string();
+    Ok(Some(NodeMatch {
+        node_id,
+        reason,
+        confidence,
+    }))
+}
+
 // ------------------------- helpers -------------------------
 
 /// Extracts the first balanced `{...}` block from an LLM response.
@@ -809,7 +918,7 @@ Given a new note and a list of similar existing notes, respond with JSON only:\n
 /// - Multiple `{...}` blocks — picks the one that looks like a valid answer
 ///   (has `items` / `type` / `keywords` / `text` / `title` keys)
 /// - Nested braces (counts them, skips string contents)
-fn extract_json(text: &str) -> Option<&str> {
+pub(crate) fn extract_json(text: &str) -> Option<&str> {
     let cleaned = strip_reasoning_preamble(text);
     let stripped = cleaned
         .trim()

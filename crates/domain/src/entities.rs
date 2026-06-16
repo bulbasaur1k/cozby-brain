@@ -295,6 +295,86 @@ impl DocPageVersion {
     }
 }
 
+// ---------------- Nodes (composite entities) ----------------
+
+/// Допустимые виды узлов. Узел — составная сущность, объединяющая несколько
+/// записей (note/todo/reminder/doc_page/link) в один смысловой объект.
+pub const NODE_KINDS: &[&str] = &["duty", "incident", "topic", "project", "release"];
+
+/// Композитная сущность («узел»). Сам по себе не хранит контент — связывает
+/// дочерние записи через [`NodeMember`]. `metadata` — произвольный JSON
+/// (project, oncall, severity и т.п.), чтобы не плодить столбцы под каждый kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Node {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    /// LLM-сжатое описание узла. Используется для match и RAG.
+    pub summary: String,
+    /// "active" | "resolved" | "archived".
+    pub status: String,
+    pub tags: Vec<String>,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Node {
+    pub fn new(kind: String, title: String, tags: Vec<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            kind,
+            title,
+            summary: String::new(),
+            status: "active".to_string(),
+            tags,
+            metadata: serde_json::Value::Object(serde_json::Map::new()),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn touch(&mut self) {
+        self.updated_at = Utc::now();
+    }
+}
+
+/// Связь узла с дочерней записью. Для `member_kind == "link"` поле `member_id`
+/// хранит сам URL (никакой отдельной сущности под ссылку не создаём).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeMember {
+    pub id: String,
+    pub node_id: String,
+    /// "note" | "todo" | "reminder" | "doc_page" | "link".
+    pub member_kind: String,
+    pub member_id: String,
+    /// "runbook" | "dashboard" | "contact" | "action" | "".
+    pub role: String,
+    pub label: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl NodeMember {
+    pub fn new(
+        node_id: String,
+        member_kind: String,
+        member_id: String,
+        role: String,
+        label: String,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            node_id,
+            member_kind,
+            member_id,
+            role,
+            label,
+            created_at: Utc::now(),
+        }
+    }
+}
+
 /// Attachment metadata. The blob lives in MinIO/S3, `storage_key` is the path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {

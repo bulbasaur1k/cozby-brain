@@ -263,6 +263,15 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     std::process::Command::new(cmd).arg(url).spawn().map(|_| ())
 }
 
+/// Оборачивает текст в OSC 8 hyperlink escape: терминалы iTerm2/wezterm/kitty
+/// делают по нему CMD+click. Терминалы без поддержки OSC 8 просто проглатывают
+/// escape и показывают `text` как обычный (текст не теряется).
+///
+/// Формат: `ESC ] 8 ; ; URL ST text ESC ] 8 ; ; ST`, где ST = `ESC \`.
+pub fn osc8(url: &str, text: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +281,14 @@ mod tests {
         let src = "see [first](https://a.example) and [second](https://b.example).";
         let r = render_with_links(src);
         assert_eq!(r.links, vec!["https://a.example", "https://b.example"]);
+    }
+
+    #[test]
+    fn osc8_wraps_url_and_text() {
+        let s = osc8("https://x.example", "[1] dashboard");
+        assert_eq!(s, "\x1b]8;;https://x.example\x1b\\[1] dashboard\x1b]8;;\x1b\\");
+        // видимый текст присутствует
+        assert!(s.contains("[1] dashboard"));
     }
 
     #[test]

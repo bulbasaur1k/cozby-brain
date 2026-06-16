@@ -1,12 +1,14 @@
 [package]
-name = "cb-persistence"
+name = "cb-mcp"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 application = { path = "../application", package = "cb-application" }
-domain = { path = "../domain", package = "cb-domain" }
 async-trait.workspace = true
-chrono.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "chrono", "uuid", "json"] }
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true

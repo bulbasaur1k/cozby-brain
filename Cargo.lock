@@ -542,6 +542,7 @@ dependencies = [
  "cb-domain",
  "chrono",
  "ractor",
+ "serde_json",
  "tracing",
 ]
 
@@ -564,6 +565,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -592,6 +594,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cb-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cb-application",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cb-notifications"
 version = "0.1.0"
 dependencies = [
@@ -610,6 +626,7 @@ dependencies = [
  "cb-application",
  "cb-domain",
  "chrono",
+ "serde_json",
  "sqlx",
 ]
 
@@ -663,6 +680,7 @@ dependencies = [
  "cb-actors",
  "cb-application",
  "cb-domain",
+ "cb-mcp",
  "chrono",
  "ractor",
  "serde",
@@ -882,6 +900,7 @@ dependencies = [
  "cb-domain",
  "cb-learning",
  "cb-llm",
+ "cb-mcp",
  "cb-notifications",
  "cb-persistence",
  "cb-storage",

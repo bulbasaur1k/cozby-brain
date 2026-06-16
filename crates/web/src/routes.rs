@@ -4,7 +4,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::app_state::AppState;
-use crate::{doc_handlers, handlers, learning_handlers};
+use crate::{doc_handlers, handlers, learning_handlers, node_handlers};
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
@@ -72,6 +72,25 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/learning/lessons/{id}/skip",
             axum::routing::post(learning_handlers::skip_lesson),
+        )
+        // nodes (composite entities)
+        .route(
+            "/api/nodes",
+            get(node_handlers::list_nodes).post(node_handlers::create_node),
+        )
+        .route(
+            "/api/nodes/{id}",
+            get(node_handlers::get_node)
+                .put(node_handlers::update_node)
+                .delete(node_handlers::delete_node),
+        )
+        .route(
+            "/api/nodes/{id}/members",
+            axum::routing::post(node_handlers::add_member),
+        )
+        .route(
+            "/api/nodes/{id}/members/{member_id}",
+            axum::routing::delete(node_handlers::remove_member),
         )
         // documentation
         .route(

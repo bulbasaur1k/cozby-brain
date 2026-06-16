@@ -11,6 +11,7 @@ use application::ports::{
 };
 use actors::doc_actor::DocActor;
 use actors::learning_actor::{LearningActor, LearningMsg};
+use actors::node_actor::NodeActor;
 use actors::note_actor::{NoteActor, NoteMsg};
 use actors::reminder_actor::{ReminderActor, ReminderMsg};
 use actors::todo_actor::TodoActor;
@@ -26,6 +27,7 @@ use persistence::doc_repo::{
     PgDocPageHistoryRepository, PgDocPageRepository, PgProjectRepository,
 };
 use persistence::learning_repo::{PgLearningTrackRepository, PgLessonRepository};
+use persistence::node_repo::PgNodeRepository;
 use persistence::note_repo::PgNoteRepository;
 use persistence::reminder_repo::PgReminderRepository;
 use persistence::todo_repo::PgTodoRepository;
@@ -127,6 +129,7 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
     let project_repo = Arc::new(PgProjectRepository::new(pool.clone()));
     let doc_page_repo = Arc::new(PgDocPageRepository::new(pool.clone()));
     let doc_history_repo = Arc::new(PgDocPageHistoryRepository::new(pool.clone()));
+    let node_repo = Arc::new(PgNodeRepository::new(pool.clone()));
 
     // --- lesson splitter (LLM-powered) ---
     let splitter: Arc<dyn LessonSplitter> = Arc::new(LlmLessonSplitter::new(llm.clone()));
@@ -175,6 +178,48 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
     .await?;
     tracing::info!("doc actor spawned");
 
+    let (node_actor, _no) = Actor::spawn(
+        Some("node_actor".to_string()),
+        NodeActor { repo: node_repo },
+        (),
+    )
+    .await?;
+    tracing::info!("node actor spawned");
+
+    // --- file-based skills (loaded once at startup) ---
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let skills = application::skills::discover_skills(&application::skills::default_skill_roots(&cwd));
+    tracing::info!(
+        count = skills.len(),
+        names = ?skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        "skills loaded"
+    );
+    let skills = Arc::new(skills);
+
+    // --- MCP servers (company-internal tool sources for the agent) ---
+    // Конфиг из MCP_CONFIG (default ./mcp-config.json). Файла нет → пустой
+    // клиент (агент работает только с внутренними tool'ами). Ошибки серверов
+    // логируем, не падаем (как qdrant/s3).
+    let mcp_client = mcp::McpClient::new();
+    let mcp_config_path =
+        std::env::var("MCP_CONFIG").unwrap_or_else(|_| "mcp-config.json".to_string());
+    match mcp::McpConfig::from_file(&mcp_config_path) {
+        Ok(mcp_cfg) => {
+            for sc in mcp_cfg.to_server_configs() {
+                let name = sc.name.clone();
+                match mcp_client.add_server(sc).await {
+                    Ok(()) => tracing::info!(server = %name, "mcp server connected"),
+                    Err(e) => tracing::warn!(server = %name, error = %e, "mcp server connect failed; skipping"),
+                }
+            }
+        }
+        Err(mcp::McpConfigError::Io(_)) => {
+            tracing::info!(path = %mcp_config_path, "no mcp-config — MCP disabled");
+        }
+        Err(e) => tracing::warn!(error = %e, "mcp config parse failed; MCP disabled"),
+    }
+    let mcp_client = Arc::new(mcp_client);
+
     spawn_reminder_ticker(reminder_actor.clone(), Duration::from_secs(10));
     spawn_learning_ticker(
         learning_actor.clone(),
@@ -189,10 +234,13 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
         reminder_actor,
         learning_actor,
         doc_actor,
+        node_actor,
         llm,
         embedding,
         vector,
         attachments,
+        skills,
+        mcp: mcp_client,
         db: pool,
     };
     Ok((create_router(state), cfg))

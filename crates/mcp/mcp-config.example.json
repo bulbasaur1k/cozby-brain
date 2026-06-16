@@ -1,0 +1,61 @@
+{
+  "$schema": "https://gist.githubusercontent.com/mcp-config.json",
+  "servers": {
+    "context7": {
+      "name": "context7",
+      "description": "Library documentation and code examples from Context7",
+      "enabled": true,
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@upstash/context7-mcp"]
+      }
+    },
+    "filesystem": {
+      "name": "filesystem",
+      "description": "Local file system access (read-only by default)",
+      "enabled": false,
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      },
+      "tools": {
+        "include": [],
+        "exclude": ["write_file", "delete_file"]
+      }
+    },
+    "git": {
+      "name": "git",
+      "description": "Git repository operations",
+      "enabled": false,
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-git"]
+      }
+    },
+    "github": {
+      "name": "github",
+      "description": "GitHub API access",
+      "enabled": false,
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"]
+      }
+    },
+    "postgres": {
+      "name": "postgres",
+      "description": "PostgreSQL database access",
+      "enabled": false,
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost:5432"]
+      }
+    }
+  },
+  "timeout_ms": 30000,
+  "enabled_servers": ["context7"]
+}

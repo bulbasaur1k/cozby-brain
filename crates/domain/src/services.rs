@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::entities::{Note, Reminder, Todo};
+use crate::entities::{Node, Note, Reminder, Todo, NODE_KINDS};
 use crate::errors::DomainError;
 
 const MAX_TITLE_LEN: usize = 256;
@@ -46,6 +46,17 @@ pub fn create_reminder(text: String, remind_at: DateTime<Utc>) -> Result<Reminde
         return Err(DomainError::InvalidTitle);
     }
     Ok(Reminder::new(trimmed.to_string(), remind_at))
+}
+
+/// Создаёт узел (составную сущность). `kind` валидируется по белому списку
+/// [`NODE_KINDS`], title — как у заметки.
+pub fn create_node(kind: String, title: String, tags: Vec<String>) -> Result<Node, DomainError> {
+    let kind = kind.trim().to_lowercase();
+    if !NODE_KINDS.contains(&kind.as_str()) {
+        return Err(DomainError::InvalidKind(kind));
+    }
+    validate_title(&title)?;
+    Ok(Node::new(kind, title.trim().to_string(), normalize_tags(tags)))
 }
 
 /// Извлекает wiki-style ссылки вида `[[target]]` из markdown-контента.
@@ -148,5 +159,20 @@ mod tests {
     #[test]
     fn reminder_requires_text() {
         assert!(create_reminder("   ".into(), Utc::now()).is_err());
+    }
+
+    #[test]
+    fn creates_node_with_valid_kind() {
+        let n = create_node("Duty".into(), "  Дежурство billing ".into(), vec!["OnCall".into()]).unwrap();
+        assert_eq!(n.kind, "duty");
+        assert_eq!(n.title, "Дежурство billing");
+        assert_eq!(n.status, "active");
+        assert_eq!(n.tags, vec!["oncall".to_string()]);
+    }
+
+    #[test]
+    fn rejects_unknown_node_kind() {
+        assert!(create_node("banana".into(), "x".into(), vec![]).is_err());
+        assert!(create_node("duty".into(), "  ".into(), vec![]).is_err());
     }
 }
