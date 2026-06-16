@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = McpConfig::default_config();
     
     // Создаём MCP клиент
-    let mut mcp_client = McpClient::new();
+    let mcp_client = McpClient::new();
     
     // Добавляем сервера из конфига
     for server_config in config.to_server_configs() {

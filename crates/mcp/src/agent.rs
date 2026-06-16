@@ -161,7 +161,7 @@ Final synthesized answer with sources
         info!("Agent starting task: {}", task.description);
         *self.state.write().await = AgentState::Thinking;
 
-        let mut actions = Vec::new();
+        let actions = Vec::new();
         let mut sources = Vec::new();
 
         // Phase 1: Information gathering
@@ -195,7 +195,7 @@ Final synthesized answer with sources
         let tools = self.mcp_client.list_all_tools().await;
         
         // Strategy: Search documentation first, then code if needed
-        for (tool_name, tool) in tools {
+        for (tool_name, _tool) in tools {
             if tool_name.contains("search") || tool_name.contains("docs") {
                 match self.call_search_tool(&tool_name, &task.description).await {
                     Ok(info) => {
@@ -333,7 +333,7 @@ impl Default for AgentBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::McpClient;
+    use crate::McpClient;
 
     #[test]
     fn test_agent_builder() {

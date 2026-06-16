@@ -6,6 +6,7 @@ use sqlx::PgPool;
 use application::ports::{EmbeddingClient, LlmClient, VectorStore};
 use actors::doc_actor::DocMsg;
 use actors::learning_actor::LearningMsg;
+use actors::node_actor::NodeMsg;
 use actors::note_actor::NoteMsg;
 use actors::reminder_actor::ReminderMsg;
 use actors::todo_actor::TodoMsg;
@@ -18,6 +19,7 @@ pub struct AppState {
     pub reminder_actor: ActorRef<ReminderMsg>,
     pub learning_actor: ActorRef<LearningMsg>,
     pub doc_actor: ActorRef<DocMsg>,
+    pub node_actor: ActorRef<NodeMsg>,
     pub llm: Arc<dyn LlmClient>,
     pub embedding: Arc<dyn EmbeddingClient>,
     pub vector: Arc<dyn VectorStore>,

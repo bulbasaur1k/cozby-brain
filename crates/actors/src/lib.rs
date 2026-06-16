@@ -1,5 +1,6 @@
 pub mod doc_actor;
 pub mod learning_actor;
+pub mod node_actor;
 pub mod note_actor;
 pub mod reminder_actor;
 pub mod todo_actor;

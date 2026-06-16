@@ -113,7 +113,7 @@ impl Actor for DocActor {
             }
             DocMsg::ListProjects(reply) => {
                 let mut all: Vec<Project> = state.values().cloned().collect();
-                all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                all.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
                 let _ = reply.send(all);
             }
             DocMsg::GetProject(id, reply) => {

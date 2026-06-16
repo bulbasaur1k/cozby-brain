@@ -83,7 +83,7 @@ impl Actor for LearningActor {
             }
             LearningMsg::ListTracks(reply) => {
                 let mut all: Vec<LearningTrack> = state.values().cloned().collect();
-                all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                all.sort_by_key(|t| std::cmp::Reverse(t.created_at));
                 let _ = reply.send(all);
             }
             LearningMsg::GetTrack(id, reply) => {

@@ -11,6 +11,7 @@ use application::ports::{
 };
 use actors::doc_actor::DocActor;
 use actors::learning_actor::{LearningActor, LearningMsg};
+use actors::node_actor::NodeActor;
 use actors::note_actor::{NoteActor, NoteMsg};
 use actors::reminder_actor::{ReminderActor, ReminderMsg};
 use actors::todo_actor::TodoActor;
@@ -26,6 +27,7 @@ use persistence::doc_repo::{
     PgDocPageHistoryRepository, PgDocPageRepository, PgProjectRepository,
 };
 use persistence::learning_repo::{PgLearningTrackRepository, PgLessonRepository};
+use persistence::node_repo::PgNodeRepository;
 use persistence::note_repo::PgNoteRepository;
 use persistence::reminder_repo::PgReminderRepository;
 use persistence::todo_repo::PgTodoRepository;
@@ -127,6 +129,7 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
     let project_repo = Arc::new(PgProjectRepository::new(pool.clone()));
     let doc_page_repo = Arc::new(PgDocPageRepository::new(pool.clone()));
     let doc_history_repo = Arc::new(PgDocPageHistoryRepository::new(pool.clone()));
+    let node_repo = Arc::new(PgNodeRepository::new(pool.clone()));
 
     // --- lesson splitter (LLM-powered) ---
     let splitter: Arc<dyn LessonSplitter> = Arc::new(LlmLessonSplitter::new(llm.clone()));
@@ -175,6 +178,14 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
     .await?;
     tracing::info!("doc actor spawned");
 
+    let (node_actor, _no) = Actor::spawn(
+        Some("node_actor".to_string()),
+        NodeActor { repo: node_repo },
+        (),
+    )
+    .await?;
+    tracing::info!("node actor spawned");
+
     spawn_reminder_ticker(reminder_actor.clone(), Duration::from_secs(10));
     spawn_learning_ticker(
         learning_actor.clone(),
@@ -189,6 +200,7 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
         reminder_actor,
         learning_actor,
         doc_actor,
+        node_actor,
         llm,
         embedding,
         vector,

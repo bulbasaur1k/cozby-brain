@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 
 use domain::entities::{
-    Attachment, DocPage, DocPageVersion, LearningTrack, Lesson, Note, Project, Reminder, Todo,
+    Attachment, DocPage, DocPageVersion, LearningTrack, Lesson, Node, NodeMember, Note, Project,
+    Reminder, Todo,
 };
 
 // ---------------- LLM port ----------------
@@ -33,11 +34,12 @@ pub trait LlmClient: Send + Sync {
 /// and where to fetch full content from when building RAG context.
 pub const KIND_NOTE: &str = "note";
 pub const KIND_DOC_PAGE: &str = "doc_page";
+pub const KIND_NODE: &str = "node";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SimilarItem {
     pub id: String,
-    /// "note" | "doc_page"
+    /// "note" | "doc_page" | "node"
     pub kind: String,
     pub title: String,
     pub score: f32,
@@ -125,6 +127,27 @@ pub trait LessonRepository: Send + Sync {
     async fn list_by_track(&self, track_id: &str) -> Result<Vec<Lesson>, RepoError>;
     /// Next pending lesson for a track (ordered by lesson_num).
     async fn next_pending(&self, track_id: &str) -> Result<Option<Lesson>, RepoError>;
+}
+
+// ---------------- Nodes (composite entities) ----------------
+
+#[async_trait]
+pub trait NodeRepository: Send + Sync {
+    async fn upsert(&self, node: &Node) -> Result<(), RepoError>;
+    async fn delete(&self, id: &str) -> Result<(), RepoError>;
+    async fn get(&self, id: &str) -> Result<Option<Node>, RepoError>;
+    async fn list(&self) -> Result<Vec<Node>, RepoError>;
+    async fn list_by_kind(&self, kind: &str) -> Result<Vec<Node>, RepoError>;
+    // --- members ---
+    async fn add_member(&self, member: &NodeMember) -> Result<(), RepoError>;
+    async fn remove_member(&self, id: &str) -> Result<(), RepoError>;
+    async fn list_members(&self, node_id: &str) -> Result<Vec<NodeMember>, RepoError>;
+    /// Обратный матч: к каким узлам уже привязана данная сущность.
+    async fn find_nodes_for_member(
+        &self,
+        member_kind: &str,
+        member_id: &str,
+    ) -> Result<Vec<Node>, RepoError>;
 }
 
 // ---------------- Documentation ----------------

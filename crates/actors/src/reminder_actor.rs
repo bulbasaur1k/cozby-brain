@@ -93,7 +93,7 @@ impl Actor for ReminderActor {
             }
             ReminderMsg::List(reply) => {
                 let mut all: Vec<Reminder> = state.values().cloned().collect();
-                all.sort_by(|a, b| a.remind_at.cmp(&b.remind_at));
+                all.sort_by_key(|r| r.remind_at);
                 let _ = reply.send(all);
             }
             ReminderMsg::CheckDue => {

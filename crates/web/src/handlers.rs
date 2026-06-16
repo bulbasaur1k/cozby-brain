@@ -690,7 +690,7 @@ async fn search_with_filters(
         if let Some(c) = cutoff {
             result.retain(|n| n.updated_at >= c);
         }
-        result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        result.sort_by_key(|n| std::cmp::Reverse(n.updated_at));
         result
     } else {
         Vec::new()
