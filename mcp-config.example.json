@@ -1,0 +1,45 @@
+{
+  "//": "Скопируй этот файл в mcp-config.json (он в .gitignore) и впиши свои серверы.",
+  "//enabled_servers": "Список имён активных серверов. Пусто [] = брать все с enabled:true.",
+  "//timeout_ms": "Таймаут одного запроса к серверу (мс).",
+
+  "servers": {
+    "dpWiki": {
+      "name": "dpWiki",
+      "description": "Внутренняя wiki компании (Confluence/wixie) через dp ai mcp",
+      "enabled": true,
+      "transport": {
+        "type": "stdio",
+        "command": "dp",
+        "args": ["ai", "mcp", "wixie"]
+      }
+    },
+
+    "dpJira": {
+      "name": "dpJira",
+      "description": "Jira через dp ai mcp",
+      "enabled": true,
+      "transport": {
+        "type": "stdio",
+        "command": "dp",
+        "args": ["ai", "mcp", "jira"]
+      }
+    },
+
+    "remoteHttp": {
+      "name": "remoteHttp",
+      "description": "Пример удалённого MCP по HTTP/SSE с авторизацией",
+      "enabled": false,
+      "transport": {
+        "type": "http",
+        "url": "https://mcp.internal.company/mcp",
+        "headers": {
+          "Authorization": "Bearer ${REPLACE_WITH_TOKEN}"
+        }
+      }
+    }
+  },
+
+  "timeout_ms": 30000,
+  "enabled_servers": ["dpWiki", "dpJira"]
+}

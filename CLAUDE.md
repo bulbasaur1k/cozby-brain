@@ -155,6 +155,19 @@ S3_SECRET_KEY=minioadmin
 - `docker-compose.yml` поднимает только `db` + `qdrant` + `minio`. Приложение на хосте.
 - Не делай `lsof -ti :PORT | xargs kill -9` без проверки — может задеть Docker proxy процессы и уронить Docker Desktop.
 
+### MCP-серверы + агентный ingest
+
+- Внешние MCP-серверы компании (wiki/Jira/сервис-каталог) подключаются через
+  **`mcp-config.json`** в корне (в `.gitignore`). Скопируй из `mcp-config.example.json`.
+  Полная инструкция — в **`MCP_SETUP.md`**.
+- Транспорты: `stdio` (дочерний процесс, напр. `dp ai mcp wixie`) и `http`/SSE.
+  Путь к конфигу можно переопределить env `MCP_CONFIG`. Нет файла → MCP отключён (не падаем).
+- Многошаговый **агент** в `POST /api/ingest` — опт-ин через env **`INGEST_AGENT=1`**.
+  Без флага — старый одношаговый классификатор. Агент собирает узел (Node) из
+  нескольких сущностей + MCP-контекста; tool'ы имеют имя `mcp__<server>__<tool>`.
+- Реализация: транспорты в `crates/mcp/src/server.rs`, агентный цикл —
+  `crates/web/src/agent.rs`, протокол/парсер — `crates/application/src/agent_protocol.rs`.
+
 ---
 
 ## 6. Быстрые команды
