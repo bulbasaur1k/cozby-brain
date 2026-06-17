@@ -185,6 +185,16 @@ fn apply_event(app: &mut App, ev: AppEvent) {
             app.status = format!("ошибка: {e}");
         }
         AppEvent::Tick => app.tick(),
+        AppEvent::Status(s) => {
+            app.connected = true;
+            app.sys = Some(s);
+        }
+        AppEvent::Activity(line) => {
+            app.activity.push_back(line);
+            while app.activity.len() > 50 {
+                app.activity.pop_front();
+            }
+        }
     }
 }
 

@@ -121,6 +121,65 @@ pub enum AppEvent {
     Pong(bool),
     Error(String),
     Tick,
+    /// Снапшот состояния сервисов (из /api/status).
+    Status(SystemStatus),
+    /// Одно live-событие активности (из SSE /api/events).
+    Activity(ActivityLine),
+}
+
+/// Состояние сервисов сервера для шапки TUI.
+#[derive(Debug, Clone, Default)]
+pub struct SystemStatus {
+    pub llm_name: String,
+    pub llm_model: Option<String>,
+    pub llm_configured: bool,
+    pub embedding: bool,
+    pub vector: bool,
+    pub storage: bool,
+    pub agent_enabled: bool,
+    pub tool_count: usize,
+    /// (name, connected, tools)
+    pub mcp_servers: Vec<(String, bool, usize)>,
+}
+
+impl SystemStatus {
+    /// Парсит JSON из /api/status (`data` объект).
+    pub fn from_json(data: &Value) -> Self {
+        let b = |p: &Value, k: &str| p[k].as_bool().unwrap_or(false);
+        let mcp_servers = data["mcp"]["servers"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|s| {
+                        (
+                            s["name"].as_str().unwrap_or("").to_string(),
+                            s["connected"].as_bool().unwrap_or(false),
+                            s["tools"].as_u64().unwrap_or(0) as usize,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        SystemStatus {
+            llm_name: data["llm"]["name"].as_str().unwrap_or("").to_string(),
+            llm_model: data["llm"]["model"].as_str().map(str::to_string),
+            llm_configured: b(&data["llm"], "configured"),
+            embedding: b(&data["embedding"], "configured"),
+            vector: b(&data["vector"], "configured"),
+            storage: b(&data["storage"], "configured"),
+            agent_enabled: data["mcp"]["agent_enabled"].as_bool().unwrap_or(false),
+            tool_count: data["mcp"]["tool_count"].as_u64().unwrap_or(0) as usize,
+            mcp_servers,
+        }
+    }
+}
+
+/// Одна строка живого лога активности.
+#[derive(Debug, Clone)]
+pub struct ActivityLine {
+    pub level: String,
+    pub kind: String,
+    pub detail: String,
 }
 
 // ─── modes ───────────────────────────────────────────────────────────
@@ -201,6 +260,11 @@ pub struct App {
     /// Запрос показать OSC 8 экран ссылок (обрабатывается в главном цикле).
     pub show_links: bool,
 
+    /// Снапшот состояния сервисов (шапка). None = ещё не получен.
+    pub sys: Option<SystemStatus>,
+    /// Кольцевой буфер последних событий активности (живой лог).
+    pub activity: std::collections::VecDeque<ActivityLine>,
+
     /// Expanded projects in Docs tab (project_id → set).
     pub expanded_projects: HashSet<String>,
     /// Loaded pages per project (project_id → Vec<page>).
@@ -236,6 +300,8 @@ impl App {
             detail_scroll: 0,
             opened: None,
             show_links: false,
+            sys: None,
+            activity: std::collections::VecDeque::with_capacity(64),
             expanded_projects: HashSet::new(),
             doc_pages: HashMap::new(),
             todo_filter: TodoFilter::LastDays(5),
@@ -707,6 +773,59 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 
 // ─── worker ──────────────────────────────────────────────────────────
 
+/// Периодически опрашивает /api/status и шлёт `AppEvent::Status`.
+fn spawn_status_poller(api: String, ev_tx: UnboundedSender<AppEvent>) {
+    tokio::spawn(async move {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("reqwest");
+        let url = format!("{api}/api/status");
+        loop {
+            if let Ok(resp) = http.get(&url).send().await {
+                if let Ok(v) = resp.json::<Value>().await {
+                    let status = SystemStatus::from_json(&v["data"]);
+                    let _ = ev_tx.send(AppEvent::Status(status));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    });
+}
+
+/// Подписывается на SSE /api/events и шлёт `AppEvent::Activity` на каждое
+/// событие. Читает поток инкрементально через `chunk()` (без feature `stream`).
+/// При обрыве — переподключается через 2 секунды.
+fn spawn_activity_stream(api: String, ev_tx: UnboundedSender<AppEvent>) {
+    tokio::spawn(async move {
+        // отдельный клиент без таймаута — поток долгоживущий
+        let http = reqwest::Client::builder().build().expect("reqwest");
+        let url = format!("{api}/api/events");
+        loop {
+            if let Ok(mut resp) = http.get(&url).send().await {
+                let mut buf = String::new();
+                while let Ok(Some(bytes)) = resp.chunk().await {
+                    buf.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(pos) = buf.find('\n') {
+                        let line: String = buf.drain(..=pos).collect();
+                        let line = line.trim_end();
+                        if let Some(data) = line.strip_prefix("data:") {
+                            if let Ok(v) = serde_json::from_str::<Value>(data.trim()) {
+                                let _ = ev_tx.send(AppEvent::Activity(ActivityLine {
+                                    level: v["level"].as_str().unwrap_or("").to_string(),
+                                    kind: v["kind"].as_str().unwrap_or("").to_string(),
+                                    detail: v["detail"].as_str().unwrap_or("").to_string(),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+}
+
 pub async fn spawn_worker(
     api: String,
     mut cmd_rx: UnboundedReceiver<AppCmd>,
@@ -716,6 +835,11 @@ pub async fn spawn_worker(
         .timeout(std::time::Duration::from_secs(180))
         .build()
         .expect("reqwest");
+
+    // Фоновая задача: поллинг /api/status каждые 3 секунды.
+    spawn_status_poller(api.clone(), ev_tx.clone());
+    // Фоновая задача: подписка на /api/events (SSE) — живой лог активности.
+    spawn_activity_stream(api.clone(), ev_tx.clone());
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {

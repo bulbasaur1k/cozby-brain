@@ -6,6 +6,7 @@ use sqlx::PgPool;
 use application::ports::{EmbeddingClient, LlmClient, VectorStore};
 use application::skills::Skill;
 use mcp::McpClient;
+use crate::activity::{ActivityBus, StatusInfo};
 use actors::doc_actor::DocMsg;
 use actors::learning_actor::LearningMsg;
 use actors::node_actor::NodeMsg;
@@ -30,6 +31,10 @@ pub struct AppState {
     pub skills: Arc<Vec<Skill>>,
     /// Подключённые MCP-серверы компании (источник внешних tool'ов для агента).
     pub mcp: Arc<McpClient>,
+    /// Шина live-событий активности (LLM/embed/MCP/agent) для /api/events.
+    pub activity: ActivityBus,
+    /// Статические факты о сервере для /api/status.
+    pub status_info: Arc<StatusInfo>,
     #[allow(dead_code)]
     pub db: PgPool,
 }

@@ -4,11 +4,14 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::app_state::AppState;
-use crate::{doc_handlers, handlers, learning_handlers, node_handlers};
+use crate::{doc_handlers, handlers, learning_handlers, node_handlers, status_handlers};
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
+        // observability: snapshot + live SSE activity stream
+        .route("/api/status", get(status_handlers::status))
+        .route("/api/events", get(status_handlers::events))
         // notes
         .route(
             "/api/notes",

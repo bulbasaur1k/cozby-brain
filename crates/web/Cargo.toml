@@ -15,5 +15,7 @@ tracing.workspace = true
 chrono.workspace = true
 ractor = "0.15"
 tokio.workspace = true
+tokio-stream.workspace = true
+async-trait.workspace = true
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }

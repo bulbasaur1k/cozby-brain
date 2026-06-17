@@ -47,6 +47,11 @@ impl<'a> IngestAgent<'a> {
     /// Запускает агентный цикл. Infallible — всегда возвращает Outcome либо None
     /// (None = совсем не удалось ничего создать, вызывающий откатится на старый путь).
     pub async fn run(&self, raw: &str) -> Option<AgentOutcome> {
+        self.state.activity.emit(
+            "start",
+            "agent",
+            format!("агент ingest: {}", raw.chars().take(50).collect::<String>()),
+        );
         let system = self.build_system_prompt(raw).await;
         let mut transcript = format!("Запрос пользователя:\n{raw}");
         let mut log: Vec<String> = Vec::new();
@@ -65,6 +70,9 @@ impl<'a> IngestAgent<'a> {
                     return self.execute_plan(plan, iter + 1, log).await;
                 }
                 AgentDecision::ToolCall(tc) => {
+                    self.state
+                        .activity
+                        .emit("info", "agent", format!("шаг {}: инструмент {}", iter + 1, tc.name));
                     let result = self.execute_tool(&tc.name, &tc.args).await;
                     let compact = compress_summary(&result, SummaryCompressionBudget::tool_result());
                     log.push(format!("tool {} → {} chars", tc.name, compact.summary.len()));
@@ -153,17 +161,24 @@ impl<'a> IngestAgent<'a> {
         }
         if name.starts_with("mcp__") {
             let arguments = if args.is_null() { None } else { Some(args.clone()) };
+            self.state.activity.emit("start", "mcp", format!("MCP вызов: {name}"));
             return match self.state.mcp.call_tool(name, arguments).await {
-                Ok(result) => result
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        mcp::ToolContent::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                Err(e) => format!("ошибка инструмента {name}: {e}"),
+                Ok(result) => {
+                    self.state.activity.emit("done", "mcp", format!("MCP ответ: {name}"));
+                    result
+                        .content
+                        .iter()
+                        .filter_map(|c| match c {
+                            mcp::ToolContent::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+                Err(e) => {
+                    self.state.activity.emit("error", "mcp", format!("MCP ошибка {name}: {e}"));
+                    format!("ошибка инструмента {name}: {e}")
+                }
             };
         }
         format!("неизвестный инструмент: {name}")
@@ -249,6 +264,11 @@ impl<'a> IngestAgent<'a> {
         let members = call!(self.state.node_actor, NodeMsg::ListMembers, node.id.clone())
             .unwrap_or_default();
 
+        self.state.activity.emit(
+            "done",
+            "agent",
+            format!("узел создан: {} (+{} членов)", node.title, members.len()),
+        );
         Some(AgentOutcome {
             node,
             members,
@@ -375,6 +395,9 @@ impl<'a> IngestAgent<'a> {
 
     /// Деградация: старый одношаговый классификатор, обёрнутый в один узел kind=topic.
     async fn fallback(&self, raw: &str, log: &mut Vec<String>) -> Option<AgentOutcome> {
+        self.state
+            .activity
+            .emit("info", "agent", "fallback на классификатор");
         log.push("fallback: classify_and_structure".to_string());
         let now = chrono::Utc::now();
         let ctx = gather_context_items(self.state, raw).await;

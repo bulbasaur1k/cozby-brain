@@ -676,6 +676,7 @@ dependencies = [
 name = "cb-web"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum 0.8.9",
  "cb-actors",
  "cb-application",
@@ -687,6 +688,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-stream",
  "tower-http",
  "tracing",
 ]
@@ -4097,6 +4099,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

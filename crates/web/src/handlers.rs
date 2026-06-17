@@ -351,7 +351,7 @@ pub async fn ical_feed(State(state): State<AppState>) -> impl IntoResponse {
 ///
 /// Returns 503 if LLM is not configured — this endpoint is LLM-mandatory.
 /// Включён ли многошаговый агент. Опт-ин через env `INGEST_AGENT` (1/true/on).
-fn agent_enabled() -> bool {
+pub(crate) fn agent_enabled() -> bool {
     std::env::var("INGEST_AGENT")
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "on" | "yes"))
         .unwrap_or(false)

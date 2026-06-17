@@ -50,8 +50,13 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
     sqlx::migrate!().run(&pool).await?;
     tracing::info!("migrations applied");
 
+    // --- activity bus (live observability) ---
+    let activity = web::activity::ActivityBus::new();
+
     // --- LLM + embedding wiring ---
-    let (llm, embedding): (Arc<dyn LlmClient>, Arc<dyn EmbeddingClient>) = match cfg.llm() {
+    let mut llm_model: Option<String> = None;
+    let mut llm_configured = false;
+    let (raw_llm, raw_embedding): (Arc<dyn LlmClient>, Arc<dyn EmbeddingClient>) = match cfg.llm() {
         Some((base_url, api_key, model, embedding_model)) => {
             tracing::info!(
                 %base_url, %model,
@@ -59,6 +64,8 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
                 authed = api_key.is_some(),
                 "llm configured"
             );
+            llm_model = Some(model.clone());
+            llm_configured = true;
             let client = Arc::new(OpenAICompatClient::with_embedding(
                 base_url,
                 api_key,
@@ -73,6 +80,13 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
             (noop.clone(), noop)
         }
     };
+    // Оборачиваем в инструментацию — эмитит события на каждый LLM/embed запрос.
+    let embedding_configured = raw_embedding.name() != "noop";
+    let llm: Arc<dyn LlmClient> =
+        Arc::new(web::activity::InstrumentedLlm::new(raw_llm, activity.clone()));
+    let embedding: Arc<dyn EmbeddingClient> = Arc::new(
+        web::activity::InstrumentedEmbedding::new(raw_embedding, activity.clone()),
+    );
 
     // --- attachment store (MinIO/S3) ---
     let attachments: Arc<dyn AttachmentStore> = match cfg.s3() {
@@ -194,6 +208,11 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
         names = ?skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
         "skills loaded"
     );
+    activity.emit(
+        "info",
+        "system",
+        format!("скилы загружены: {}", skills.len()),
+    );
     let skills = Arc::new(skills);
 
     // --- MCP servers (company-internal tool sources for the agent) ---
@@ -208,8 +227,14 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
             for sc in mcp_cfg.to_server_configs() {
                 let name = sc.name.clone();
                 match mcp_client.add_server(sc).await {
-                    Ok(()) => tracing::info!(server = %name, "mcp server connected"),
-                    Err(e) => tracing::warn!(server = %name, error = %e, "mcp server connect failed; skipping"),
+                    Ok(()) => {
+                        tracing::info!(server = %name, "mcp server connected");
+                        activity.emit("info", "mcp", format!("MCP подключён: {name}"));
+                    }
+                    Err(e) => {
+                        tracing::warn!(server = %name, error = %e, "mcp server connect failed; skipping");
+                        activity.emit("error", "mcp", format!("MCP ошибка {name}: {e}"));
+                    }
                 }
             }
         }
@@ -219,6 +244,15 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
         Err(e) => tracing::warn!(error = %e, "mcp config parse failed; MCP disabled"),
     }
     let mcp_client = Arc::new(mcp_client);
+
+    let status_info = Arc::new(web::activity::StatusInfo {
+        llm_name: llm.name().to_string(),
+        llm_model,
+        llm_configured,
+        embedding_configured,
+        vector_configured: cfg.qdrant_url().is_some(),
+        storage_configured: attachments.name() != "noop",
+    });
 
     spawn_reminder_ticker(reminder_actor.clone(), Duration::from_secs(10));
     spawn_learning_ticker(
@@ -241,6 +275,8 @@ pub async fn build_app() -> anyhow::Result<(Router, AppConfig)> {
         attachments,
         skills,
         mcp: mcp_client,
+        activity,
+        status_info,
         db: pool,
     };
     Ok((create_router(state), cfg))

@@ -3,7 +3,7 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use serde_json::Value;
 
@@ -15,18 +15,35 @@ use crate::theme;
 pub fn render(f: &mut Frame, app: &App) {
     let area = f.area();
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    // Панель активности показываем только когда есть события (не съедаем место зря).
+    let show_activity = !app.activity.is_empty();
+    let constraints = if show_activity {
+        vec![
+            Constraint::Length(1), // header
+            Constraint::Min(1),    // body
+            Constraint::Length(6), // activity panel
+            Constraint::Length(1), // statusbar
+        ]
+    } else {
+        vec![
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
-        ])
+        ]
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     render_header(f, app, chunks[0]);
     render_body(f, app, chunks[1]);
-    render_statusbar(f, app, chunks[2]);
+    if show_activity {
+        render_activity(f, app, chunks[2]);
+        render_statusbar(f, app, chunks[3]);
+    } else {
+        render_statusbar(f, app, chunks[2]);
+    }
 
     // Overlays
     if app.opened.is_some() {
@@ -37,6 +54,45 @@ pub fn render(f: &mut Frame, app: &App) {
     }
 }
 
+// ─── activity panel (live event log) ─────────────────────────────────
+
+fn render_activity(f: &mut Frame, app: &App, area: Rect) {
+    let inner_lines = area.height.saturating_sub(2) as usize; // minus borders
+    let take = inner_lines.max(1);
+    let lines: Vec<Line> = app
+        .activity
+        .iter()
+        .rev()
+        .take(take)
+        .rev()
+        .map(|e| {
+            let style = match e.level.as_str() {
+                "error" => theme::error(),
+                "done" => theme::ok(),
+                "start" => theme::accent(),
+                _ => theme::subtext(),
+            };
+            let glyph = match e.level.as_str() {
+                "error" => "✗",
+                "done" => "✓",
+                "start" => "▸",
+                _ => "·",
+            };
+            Line::from(vec![
+                Span::styled(format!(" {glyph} "), style),
+                Span::styled(format!("[{}] ", e.kind), theme::overlay()),
+                Span::styled(e.detail.clone(), theme::subtext()),
+            ])
+        })
+        .collect();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::overlay())
+        .title(Span::styled(" Активность ", theme::accent()));
+    let p = Paragraph::new(lines).block(block);
+    f.render_widget(p, area);
+}
+
 // ─── header ──────────────────────────────────────────────────────────
 
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
@@ -45,7 +101,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     } else {
         ("●", theme::error())
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled("  cozby", theme::accent()),
         Span::styled(" · ", theme::overlay()),
         Span::styled(app.api.clone(), theme::subtext()),
@@ -55,8 +111,38 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
             if app.connected { " connected" } else { " offline" },
             theme::subtext(),
         ),
-    ]);
-    let p = Paragraph::new(line).style(Style::default().bg(theme::MANTLE));
+    ];
+
+    // Индикаторы сервисов (из /api/status).
+    if let Some(s) = &app.sys {
+        let ind = |on: bool, label: &str| -> Vec<Span<'static>> {
+            let st = if on { theme::ok() } else { theme::overlay() };
+            vec![
+                Span::styled("  ", theme::overlay()),
+                Span::styled("●", st),
+                Span::styled(format!(" {label}"), theme::subtext()),
+            ]
+        };
+        spans.push(Span::styled("   │", theme::overlay()));
+        // LLM: модель кратко, иначе имя провайдера
+        let llm_label = s
+            .llm_model
+            .as_deref()
+            .map(|m| m.rsplit('/').next().unwrap_or(m))
+            .filter(|m| !m.is_empty())
+            .unwrap_or(s.llm_name.as_str());
+        spans.extend(ind(s.llm_configured, llm_label));
+        spans.extend(ind(s.vector, "Qdrant"));
+        spans.extend(ind(s.embedding, "Embed"));
+        spans.extend(ind(s.storage, "S3"));
+        let mcp_on = s.mcp_servers.iter().any(|(_, c, _)| *c);
+        spans.extend(ind(mcp_on, &format!("MCP({} tools)", s.tool_count)));
+        if s.agent_enabled {
+            spans.push(Span::styled("  ⚡agent", theme::accent()));
+        }
+    }
+
+    let p = Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::MANTLE));
     f.render_widget(p, area);
 }
 
